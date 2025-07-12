@@ -9,7 +9,7 @@ import os
 from rasterio.mask import mask
 from zipfile import ZipFile
 import requests
-from rasterio.transform import rowcol
+from scipy.ndimage import gaussian_filter
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="centered")
 st.title("🦌 Digital Deer Scout – Terrain AI")
@@ -59,12 +59,13 @@ def calculate_slope_aspect(dem_path, geometry):
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation_data = out_image[0].astype(float)
 
+        elevation_data = gaussian_filter(elevation_data, sigma=1)  # smooth out jagged noise
         x, y = np.gradient(elevation_data)
         slope = np.sqrt(x * x + y * y)
         aspect = np.arctan2(-x, y) * 180 / np.pi
         aspect = np.where(aspect < 0, 360 + aspect, aspect)
 
-    return slope, aspect
+    return slope, aspect, out_transform
 
 def aspect_matches_wind(aspect, wind):
     wind_aspects = {
@@ -74,46 +75,46 @@ def aspect_matches_wind(aspect, wind):
     expected = wind_aspects.get(wind, 180)
     return abs(aspect - expected) < 45
 
+def sample_features(slope, aspect, transform, geometry, level):
+    buck_pins, doe_pins = [], []
+    count = 0
+    max_points = 100 * level
+    rows, cols = slope.shape
+
+    for r in range(rows):
+        for c in range(cols):
+            if count > max_points:
+                break
+            sl = slope[r][c]
+            asp = aspect[r][c]
+            x, y = rasterio.transform.xy(transform, r, c)
+            pt = Point(x, y)
+
+            if not geometry.contains(pt):
+                continue
+
+            if show_buck_beds and 5 < sl < 30 and aspect_matches_wind(asp, wind):
+                buck_pins.append(pt)
+                count += 1
+            elif show_doe_beds and sl < 5:
+                doe_pins.append(pt)
+                count += 1
+
+    return buck_pins[:level*3], doe_pins[:level*5]
+
 def generate_terrain_pins(geometry, wind, level, dem_path):
-    buck_pins, doe_pins, scrape_pins = [], [], []
+    slope, aspect, transform = calculate_slope_aspect(dem_path, geometry)
+    buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, level)
 
-    with rasterio.open(dem_path) as src:
-        out_image, out_transform = mask(src, [geometry], crop=True)
-        elevation_data = out_image[0].astype(float)
-        slope = np.hypot(*np.gradient(elevation_data))
-        aspect = np.arctan2(-np.gradient(elevation_data)[1], np.gradient(elevation_data)[0]) * 180 / np.pi
-        aspect = np.where(aspect < 0, 360 + aspect, aspect)
+    scrape_pins = []
+    if show_scrapes:
+        for b in buck_pins:
+            for d in doe_pins:
+                if b.distance(d) < 0.003:
+                    mid = Point((b.x + d.x)/2, (b.y + d.y)/2)
+                    scrape_pins.append(mid)
 
-        bounds = geometry.bounds
-        minx, miny, maxx, maxy = bounds
-        step = (maxx - minx) / (level * 8)
-
-        for i in range(level * 8):
-            for j in range(level * 8):
-                px = minx + step * i
-                py = miny + step * j
-                point = Point(px, py)
-
-                if geometry.contains(point):
-                    try:
-                        row, col = rowcol(out_transform, px, py)
-                        sl = slope[row, col]
-                        asp = aspect[row, col]
-
-                        if show_buck_beds and 5 < sl < 30 and aspect_matches_wind(asp, wind):
-                            buck_pins.append(point)
-                        elif show_doe_beds and sl < 5:
-                            doe_pins.append(point)
-                    except IndexError:
-                        continue
-
-    for b in buck_pins:
-        for d in doe_pins:
-            if b.distance(d) < 0.002:
-                mid = Point((b.x + d.x)/2, (b.y + d.y)/2)
-                scrape_pins.append(mid)
-
-    return buck_pins[:level * 2], doe_pins[:level * 2], scrape_pins[:level * 2]
+    return buck_pins, doe_pins, scrape_pins[:level * 3]
 
 # --- Main Logic ---
 if uploaded_file:
@@ -151,6 +152,6 @@ if uploaded_file:
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
             kml.save(tmp.name)
-            st.download_button("📅 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
+            st.download_button("📥 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
 
         st.success(f"📌 Generated {total_buck} buck beds, {total_doe} doe beds, and {total_scrape} scrapes.")
