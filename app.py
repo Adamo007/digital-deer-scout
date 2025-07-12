@@ -9,6 +9,7 @@ import os
 from rasterio.mask import mask
 from zipfile import ZipFile
 import requests
+from rasterio.transform import rowcol
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="centered")
 st.title("🦌 Digital Deer Scout – Terrain AI")
@@ -74,28 +75,37 @@ def aspect_matches_wind(aspect, wind):
     return abs(aspect - expected) < 45
 
 def generate_terrain_pins(geometry, wind, level, dem_path):
-    slope, aspect = calculate_slope_aspect(dem_path, geometry)
     buck_pins, doe_pins, scrape_pins = [], [], []
 
-    bounds = geometry.bounds
-    minx, miny, maxx, maxy = bounds
-    step = (maxx - minx) / (level * 8)
+    with rasterio.open(dem_path) as src:
+        out_image, out_transform = mask(src, [geometry], crop=True)
+        elevation_data = out_image[0].astype(float)
+        slope = np.hypot(*np.gradient(elevation_data))
+        aspect = np.arctan2(-np.gradient(elevation_data)[1], np.gradient(elevation_data)[0]) * 180 / np.pi
+        aspect = np.where(aspect < 0, 360 + aspect, aspect)
 
-    for i in range(level * 8):
-        for j in range(level * 8):
-            px = minx + step * i
-            py = miny + step * j
-            p = Point(px, py)
-            if geometry.contains(p):
-                ix = min(j, slope.shape[0] - 1)
-                iy = min(i, slope.shape[1] - 1)
-                sl = slope[ix][iy]
-                asp = aspect[ix][iy]
+        bounds = geometry.bounds
+        minx, miny, maxx, maxy = bounds
+        step = (maxx - minx) / (level * 8)
 
-                if show_buck_beds and 5 < sl < 30 and aspect_matches_wind(asp, wind):
-                    buck_pins.append(p)
-                elif show_doe_beds and sl < 5:
-                    doe_pins.append(p)
+        for i in range(level * 8):
+            for j in range(level * 8):
+                px = minx + step * i
+                py = miny + step * j
+                point = Point(px, py)
+
+                if geometry.contains(point):
+                    try:
+                        row, col = rowcol(out_transform, px, py)
+                        sl = slope[row, col]
+                        asp = aspect[row, col]
+
+                        if show_buck_beds and 5 < sl < 30 and aspect_matches_wind(asp, wind):
+                            buck_pins.append(point)
+                        elif show_doe_beds and sl < 5:
+                            doe_pins.append(point)
+                    except IndexError:
+                        continue
 
     for b in buck_pins:
         for d in doe_pins:
@@ -141,6 +151,6 @@ if uploaded_file:
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
             kml.save(tmp.name)
-            st.download_button("📥 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
+            st.download_button("📅 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
 
         st.success(f"📌 Generated {total_buck} buck beds, {total_doe} doe beds, and {total_scrape} scrapes.")
