@@ -66,10 +66,12 @@ def fetch_opentopo_dem(bounds, out_path="dem.tif"):
 
 def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
+        st.write(f"DEM bounds: {src.bounds}")
+        st.write(f"Polygon bounds: {geometry.bounds}")
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation_data = out_image[0].astype(float)
 
-        elevation_data = gaussian_filter(elevation_data, sigma=0.6)
+        elevation_data = gaussian_filter(elevation_data, sigma=0.5)
         x, y = np.gradient(elevation_data)
         slope = np.sqrt(x * x + y * y)
         aspect = np.arctan2(-x, y) * 180 / np.pi
@@ -81,7 +83,7 @@ def calculate_slope_aspect(dem_path, geometry):
             ax.set_title("Topographic Elevation Map")
             st.pyplot(fig)
 
-        patchcut = sobel(elevation_data) < 0.05
+        patchcut = sobel(elevation_data) < 0.04
 
     return slope, aspect, out_transform, patchcut
 
@@ -91,11 +93,11 @@ def aspect_matches_wind(aspect, wind):
         "S": 0,   "SW": 45,  "W": 90,  "NW": 135
     }
     expected = wind_aspects.get(wind, 180)
-    return abs(aspect - expected) < 45
+    return abs(aspect - expected) < 60
 
 def sample_features(slope, aspect, transform, geometry, patchcut, level):
     buck_pins, doe_pins = [], []
-    slope_thresh = (3, 32)
+    slope_thresh = (2, 35)
     flat_mask = slope < 3
     buck_mask = (slope > slope_thresh[0]) & (slope < slope_thresh[1])
 
@@ -108,6 +110,8 @@ def sample_features(slope, aspect, transform, geometry, patchcut, level):
         for c in range(5, cols - 5)
         if geometry.contains(Point(*rasterio.transform.xy(transform, r, c, offset='center')))
     ]
+
+    st.write(f"Found {len(candidate_indices)} candidate points inside the polygon")
 
     for r, c in candidate_indices:
         x, y = rasterio.transform.xy(transform, r, c, offset='center')
@@ -207,24 +211,7 @@ if uploaded_file:
                 ))
 
             view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
-            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/satellite-streets-v12", initial_view_state=view_state, layers=all_layers))            # --- Optional KML Export ---
-            if st.button("📤 Export pins as KML"):
-                kml = Kml()
-                for p in buck_pins:
-                    kml.newpoint(name="Buck Bed", coords=[(p.x, p.y)])
-                for p in doe_pins:
-                    kml.newpoint(name="Doe Bed", coords=[(p.x, p.y)])
-                for p in scrape_pins:
-                    kml.newpoint(name="Scrape", coords=[(p.x, p.y)])
-                for line in funnels:
-                    kml.newlinestring(name="Funnel", coords=[(pt[0], pt[1]) for pt in line.coords])
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
-                    kml.save(tmp.name)
-                    with open(tmp.name, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode()
-                        href = f'<a href="data:application/vnd.google-earth.kml+xml;base64,{b64}" download="scouting_output.kml">📥 Download KML</a>'
-                        st.markdown(href, unsafe_allow_html=True)
-
+            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/satellite-v9", initial_view_state=view_state, layers=all_layers))
 
     except Exception as e:
         st.error(f"❌ Error: {e}")
