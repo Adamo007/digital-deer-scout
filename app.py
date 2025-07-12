@@ -42,7 +42,7 @@ def fetch_opentopo_dem(bounds, out_path="dem.tif"):
     url = (
         f"https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1"
         f"&south={miny}&north={maxy}&west={minx}&east={maxx}&outputFormat=GTiff"
-        f"&API_Key=demotoken"
+        f"&API_Key=aea0486d46c35ee7b32c6c5eeae4b17a"
     )
     r = requests.get(url)
     if r.status_code == 200:
