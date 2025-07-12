@@ -3,19 +3,15 @@ import geopandas as gpd
 from shapely.geometry import Point, Polygon
 from simplekml import Kml
 import tempfile
-import numpy as np
-import requests
 import rasterio
-import rasterio.io
-from rasterio.transform import from_bounds
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.enums import Resampling as Rsp
-from rasterio.crs import CRS
+import numpy as np
+import os
 from rasterio.mask import mask
-from pyproj import Transformer
+from zipfile import ZipFile
+import requests
 
-st.set_page_config(page_title="Cloud-Based Digital Deer Scout", layout="centered")
-st.title("☁️ Digital Deer Scout – Cloud Terrain AI")
+st.set_page_config(page_title="Digital Deer Scout AI", layout="centered")
+st.title("🦌 Digital Deer Scout – Terrain AI")
 
 # --- Sidebar UI ---
 st.sidebar.header("🧠 Scouting Parameters")
@@ -28,11 +24,10 @@ show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 
-uploaded_file = st.file_uploader("Upload your hunt area .KML or .KMZ", type=["kml", "kmz"])
+uploaded_file = st.file_uploader("📍 Upload your hunt area KML/KMZ – DEM is fetched automatically", type=["kml", "kmz"])
 
 # --- Helper Functions ---
 def extract_kml(file) -> gpd.GeoDataFrame:
-    from zipfile import ZipFile
     if file.name.endswith('.kmz'):
         with ZipFile(file) as zf:
             kml_name = [f for f in zf.namelist() if f.endswith('.kml')][0]
@@ -42,29 +37,32 @@ def extract_kml(file) -> gpd.GeoDataFrame:
         gdf = gpd.read_file(file)
     return gdf.to_crs("EPSG:4326")
 
-def fetch_usgs_dem(bounds):
+def fetch_opentopo_dem(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
     url = (
-        f"https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?"
-        f"bbox={minx},{miny},{maxx},{maxy}&bboxSR=4326&size=512,512&imageSR=4326&format=tiff&f=image"
+        f"https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1"
+        f"&south={miny}&north={maxy}&west={minx}&east={maxx}&outputFormat=GTiff"
+        f"&API_Key=demotoken"
     )
-    resp = requests.get(url)
-    if resp.status_code != 200:
+    r = requests.get(url)
+    if r.status_code == 200:
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+        return out_path
+    else:
         raise Exception("DEM download failed")
-    return resp.content
 
-def calculate_slope_aspect_from_bytes(tiff_bytes, geometry):
-    with rasterio.io.MemoryFile(tiff_bytes) as memfile:
-        with memfile.open() as src:
-            out_image, out_transform = mask(src, [geometry], crop=True)
-            elevation = out_image[0].astype(float)
+def calculate_slope_aspect(dem_path, geometry):
+    with rasterio.open(dem_path) as src:
+        out_image, out_transform = mask(src, [geometry], crop=True)
+        elevation_data = out_image[0].astype(float)
 
-            x, y = np.gradient(elevation)
-            slope = np.sqrt(x*x + y*y)
-            aspect = np.arctan2(-x, y) * 180 / np.pi
-            aspect = np.where(aspect < 0, 360 + aspect, aspect)
+        x, y = np.gradient(elevation_data)
+        slope = np.sqrt(x*x + y*y)
+        aspect = np.arctan2(-x, y) * 180 / np.pi
+        aspect = np.where(aspect < 0, 360 + aspect, aspect)
 
-            return slope, aspect
+    return slope, aspect
 
 def aspect_matches_wind(aspect, wind):
     wind_aspects = {
@@ -74,8 +72,8 @@ def aspect_matches_wind(aspect, wind):
     expected = wind_aspects.get(wind, 180)
     return abs(aspect - expected) < 45
 
-def generate_terrain_pins(geometry, wind, level, dem_bytes):
-    slope, aspect = calculate_slope_aspect_from_bytes(dem_bytes, geometry)
+def generate_terrain_pins(geometry, wind, level, dem_path):
+    slope, aspect = calculate_slope_aspect(dem_path, geometry)
     buck_pins, doe_pins, scrape_pins = [], [], []
 
     bounds = geometry.bounds
@@ -107,15 +105,23 @@ def generate_terrain_pins(geometry, wind, level, dem_bytes):
 # --- Main Logic ---
 if uploaded_file:
     gdf = extract_kml(uploaded_file)
-    st.success("✅ Hunt boundary loaded.")
 
-    if st.button("🎯 Generate AI Pins"):        
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tif") as tmp_dem:
+        try:
+            bounds = gdf.total_bounds
+            fetch_opentopo_dem(bounds, tmp_dem.name)
+            dem_path = tmp_dem.name
+            st.success("✅ Elevation data fetched automatically based on your hunting boundary.")
+        except Exception as e:
+            st.error(f"❌ DEM fetch failed: {e}")
+            st.stop()
+
+    if st.button("🎯 Generate AI Pins"):
         kml = Kml()
 
         for _, row in gdf.iterrows():
             if isinstance(row.geometry, Polygon):
-                dem_bytes = fetch_usgs_dem(row.geometry.bounds)
-                buck_pins, doe_pins, scrape_pins = generate_terrain_pins(row.geometry, wind, aggression, dem_bytes)
+                buck_pins, doe_pins, scrape_pins = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
 
                 if show_buck_beds:
                     for pt in buck_pins:
@@ -131,6 +137,6 @@ if uploaded_file:
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
             kml.save(tmp.name)
-            st.download_button("📥 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
+            st.download_button("📅 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
 
         st.success("📌 Terrain-based pins generated and export-ready.")

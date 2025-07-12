@@ -12,4 +12,6 @@ simplekml
 rasterio
 numpy
 elevation
-
+requests
+rasterio
+numpy
