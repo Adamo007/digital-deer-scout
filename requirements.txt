@@ -16,3 +16,6 @@ requests
 rasterio
 numpy
 scipy
+pydeck
+matplotlib
+scikit-learn

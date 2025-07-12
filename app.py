@@ -1,6 +1,6 @@
 import streamlit as st
 import geopandas as gpd
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
 from simplekml import Kml
 import tempfile
@@ -13,6 +13,7 @@ import requests
 from scipy.ndimage import gaussian_filter
 import pydeck as pdk
 import matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
@@ -117,6 +118,21 @@ def sample_features(slope, aspect, transform, geometry, level):
 
     return buck_pins[:max_pins], doe_pins[:max_pins]
 
+def predict_funnels(pins):
+    if len(pins) < 2:
+        return []
+    coords = np.array([[p.x, p.y] for p in pins])
+    clusters = DBSCAN(eps=0.0015, min_samples=2).fit(coords)
+    funnels = []
+    for cluster_id in set(clusters.labels_):
+        if cluster_id == -1:
+            continue
+        cluster_points = coords[clusters.labels_ == cluster_id]
+        if len(cluster_points) >= 2:
+            line = LineString(cluster_points)
+            funnels.append(line)
+    return funnels
+
 def generate_terrain_pins(geometry, wind, level, dem_path):
     slope, aspect, transform = calculate_slope_aspect(dem_path, geometry)
     buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, level)
@@ -128,10 +144,9 @@ def generate_terrain_pins(geometry, wind, level, dem_path):
                 if b.distance(d) < 0.003:
                     mid = Point((b.x + d.x)/2, (b.y + d.y)/2)
                     scrape_pins.append(mid)
+        scrape_pins = list(unary_union(scrape_pins).geoms) if scrape_pins else []
 
-        scrape_pins = list(unary_union(scrape_pins).geoms) if len(scrape_pins) > 0 else []
-
-    return buck_pins, doe_pins, scrape_pins[:level * 3]
+    return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins)
 
 # --- Main Logic ---
 if uploaded_file:
@@ -150,12 +165,11 @@ if uploaded_file:
     if st.button("🎯 Generate AI Pins"):
         kml = Kml()
         total_buck, total_doe, total_scrape = 0, 0, 0
-
-        buck_coords, doe_coords, scrape_coords = [], [], []
+        buck_coords, doe_coords, scrape_coords, funnel_coords = [], [], [], []
 
         for _, row in gdf.iterrows():
             if isinstance(row.geometry, Polygon):
-                buck_pins, doe_pins, scrape_pins = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
+                buck_pins, doe_pins, scrape_pins, funnels = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
 
                 for pt in buck_pins:
                     kml.newpoint(name="Buck Bed", coords=[(pt.x, pt.y)])
@@ -172,6 +186,12 @@ if uploaded_file:
                     total_scrape += 1
                     scrape_coords.append({"lat": pt.y, "lon": pt.x})
 
+                for line in funnels:
+                    coords = list(line.coords)
+                    for i in range(len(coords)-1):
+                        ls = kml.newlinestring(name="Funnel", coords=[coords[i], coords[i+1]])
+                        funnel_coords.append({"lat": coords[i][1], "lon": coords[i][0], "type": "Funnel", "color": [0, 255, 255]})
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
             kml.save(tmp.name)
             st.download_button("📅 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
@@ -181,24 +201,22 @@ if uploaded_file:
         # --- Interactive Visualization ---
         st.subheader("🗺️ Interactive Pin Map Preview")
         all_coords = []
-        if show_buck_beds:
-            for p in buck_coords:
-                p["type"] = "Buck Bed"
-                p["color"] = [255, 0, 0]
-                all_coords.append(p)
-        if show_doe_beds:
-            for p in doe_coords:
-                p["type"] = "Doe Bed"
-                p["color"] = [0, 255, 0]
-                all_coords.append(p)
-        if show_scrapes:
-            for p in scrape_coords:
-                p["type"] = "Scrape"
-                p["color"] = [255, 255, 0]
-                all_coords.append(p)
+        for p in buck_coords:
+            p["type"] = "Buck Bed"
+            p["color"] = [255, 0, 0]
+            all_coords.append(p)
+        for p in doe_coords:
+            p["type"] = "Doe Bed"
+            p["color"] = [0, 255, 0]
+            all_coords.append(p)
+        for p in scrape_coords:
+            p["type"] = "Scrape"
+            p["color"] = [255, 255, 0]
+            all_coords.append(p)
+        for p in funnel_coords:
+            all_coords.append(p)
 
         if all_coords:
-            map_data = gpd.GeoDataFrame(all_coords)
             st.pydeck_chart(pdk.Deck(
                 map_style="mapbox://styles/mapbox/satellite-streets-v11",
                 initial_view_state=pdk.ViewState(
@@ -210,11 +228,22 @@ if uploaded_file:
                 layers=[
                     pdk.Layer(
                         "ScatterplotLayer",
-                        data=all_coords,
+                        data=[p for p in all_coords if p["type"] != "Funnel"],
                         get_position='[lon, lat]',
                         get_color='color',
                         get_radius=8,
                         pickable=True,
+                    ),
+                    pdk.Layer(
+                        "PathLayer",
+                        data=[{
+                            "path": [[p["lon"], p["lat"]] for p in funnel_coords],
+                            "color": [0, 255, 255],
+                        }],
+                        get_path="path",
+                        get_color="color",
+                        width_scale=5,
+                        width_min_pixels=2,
                     )
                 ],
                 tooltip={"text": "{type}"},
