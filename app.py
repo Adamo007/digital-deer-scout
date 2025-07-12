@@ -20,6 +20,8 @@ import PIL.Image as Image
 from io import BytesIO
 import base64
 
+pdk.settings.mapbox_api_key = "pk.eyJ1IjoiYWRhbW8wMDciLCJhIjoiY21kMGNpcms2MTlvaTJscHppNmdtNzRzYyJ9.5g_goxXeEETGRnsTX7y7OA"
+
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🧈 Digital Deer Scout – Terrain AI")
 
@@ -223,6 +225,22 @@ if uploaded_file:
 
             view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
             st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/satellite-v9", initial_view_state=view_state, layers=all_layers))
+
+            # --- KML Output ---
+            kml = Kml()
+            for pt in buck_pins:
+                kml.newpoint(name="Buck Bed", coords=[(pt.x, pt.y)])
+            for pt in doe_pins:
+                kml.newpoint(name="Doe Bed", coords=[(pt.x, pt.y)])
+            for pt in scrape_pins:
+                kml.newpoint(name="Scrape", coords=[(pt.x, pt.y)])
+            for line in funnels:
+                kml.newlinestring(name="Funnel", coords=list(line.coords))
+
+            kml_path = os.path.join(tempfile.gettempdir(), "scouting_output.kml")
+            kml.save(kml_path)
+            with open(kml_path, "rb") as f:
+                st.download_button("⬇️ Download KML Output", f, file_name="deer_scout_output.kml")
 
     except Exception as e:
         st.error(f"❌ Error: {e}")
