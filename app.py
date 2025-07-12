@@ -21,7 +21,7 @@ from io import BytesIO
 import base64
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
-st.title("🪼 Digital Deer Scout – Terrain AI")
+st.title("🧈 Digital Deer Scout – Terrain AI")
 
 # --- Sidebar UI ---
 st.sidebar.header("🧠 Scouting Parameters")
@@ -36,77 +36,6 @@ show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", True)
 
 uploaded_file = st.file_uploader("Upload your hunt area .KML or .KMZ", type=["kml", "kmz"])
-if uploaded_file:
-    try:
-        gdf = extract_kml(uploaded_file)
-        st.success("✅ KML loaded successfully.")
-        geometry = gdf.geometry.iloc[0]
-
-        dem_path = fetch_opentopo_dem(geometry.bounds)
-        st.info("🔍 Generating terrain-aware pins...")
-
-        buck_pins, doe_pins, scrape_pins, funnels = generate_terrain_pins(
-            geometry, wind, aggression, dem_path
-        )
-
-        all_layers = []
-
-        if show_buck_beds:
-            all_layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=[{"lat": p.y, "lon": p.x} for p in buck_pins],
-                get_position='[lon, lat]',
-                get_radius=6,
-                get_fill_color='[180, 0, 0]',
-                pickable=True,
-            ))
-
-        if show_doe_beds:
-            all_layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=[{"lat": p.y, "lon": p.x} for p in doe_pins],
-                get_position='[lon, lat]',
-                get_radius=6,
-                get_fill_color='[0, 100, 0]',
-                pickable=True,
-            ))
-
-        if show_scrapes:
-            all_layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=[{"lat": p.y, "lon": p.x} for p in scrape_pins],
-                get_position='[lon, lat]',
-                get_radius=4,
-                get_fill_color='[255, 165, 0]',
-                pickable=True,
-            ))
-
-        for line in funnels:
-            all_layers.append(pdk.Layer(
-                "PathLayer",
-                data=[{
-                    "path": [[pt[0], pt[1]] for pt in line.coords],
-                    "color": [0, 0, 255]
-                }],
-                get_path="path",
-                get_width=2,
-                get_color="color"
-            ))
-
-        st.pydeck_chart(pdk.Deck(
-            map_style="mapbox://styles/mapbox/outdoors-v12",
-            initial_view_state=pdk.ViewState(
-                latitude=geometry.centroid.y,
-                longitude=geometry.centroid.x,
-                zoom=15,
-                pitch=30,
-            ),
-            layers=all_layers
-        ))
-
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
-
 
 # --- Helper Functions ---
 def extract_kml(file) -> gpd.GeoDataFrame:
@@ -226,3 +155,59 @@ def generate_terrain_pins(geometry, wind, level, dem_path):
         scrape_pins = list(unary_union(scrape_pins).geoms) if scrape_pins else []
 
     return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins)
+
+# --- Main Logic ---
+if uploaded_file:
+    try:
+        gdf = extract_kml(uploaded_file)
+        st.success("✅ KML parsed. Generating elevation model and pins...")
+
+        for _, row in gdf.iterrows():
+            if row.geometry.geom_type != "Polygon":
+                continue
+            dem_path = fetch_opentopo_dem(row.geometry.bounds)
+            buck_pins, doe_pins, scrape_pins, funnels = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
+
+            all_layers = []
+
+            if show_buck_beds:
+                all_layers.append(pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"lat": p.y, "lon": p.x} for p in buck_pins],
+                    get_position='[lon, lat]',
+                    get_radius=5,
+                    get_color='[255, 0, 0]',
+                    pickable=True,
+                ))
+            if show_doe_beds:
+                all_layers.append(pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"lat": p.y, "lon": p.x} for p in doe_pins],
+                    get_position='[lon, lat]',
+                    get_radius=5,
+                    get_color='[0, 255, 0]',
+                    pickable=True,
+                ))
+            if show_scrapes:
+                all_layers.append(pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"lat": p.y, "lon": p.x} for p in scrape_pins],
+                    get_position='[lon, lat]',
+                    get_radius=4,
+                    get_color='[0, 0, 255]',
+                    pickable=True,
+                ))
+            if funnels:
+                all_layers.append(pdk.Layer(
+                    "PathLayer",
+                    data=[{"path": [[p[0], p[1]] for p in line.coords]} for line in funnels],
+                    get_path='path',
+                    get_width=2,
+                    get_color='[255, 165, 0]',
+                ))
+
+            view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
+            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/outdoors-v11", initial_view_state=view_state, layers=all_layers))
+
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
