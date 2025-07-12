@@ -207,7 +207,24 @@ if uploaded_file:
                 ))
 
             view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
-            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/outdoors-v11", initial_view_state=view_state, layers=all_layers))
+            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/satellite-streets-v12", initial_view_state=view_state, layers=all_layers))            # --- Optional KML Export ---
+            if st.button("📤 Export pins as KML"):
+                kml = Kml()
+                for p in buck_pins:
+                    kml.newpoint(name="Buck Bed", coords=[(p.x, p.y)])
+                for p in doe_pins:
+                    kml.newpoint(name="Doe Bed", coords=[(p.x, p.y)])
+                for p in scrape_pins:
+                    kml.newpoint(name="Scrape", coords=[(p.x, p.y)])
+                for line in funnels:
+                    kml.newlinestring(name="Funnel", coords=[(pt[0], pt[1]) for pt in line.coords])
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
+                    kml.save(tmp.name)
+                    with open(tmp.name, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode()
+                        href = f'<a href="data:application/vnd.google-earth.kml+xml;base64,{b64}" download="scouting_output.kml">📥 Download KML</a>'
+                        st.markdown(href, unsafe_allow_html=True)
+
 
     except Exception as e:
         st.error(f"❌ Error: {e}")
