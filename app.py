@@ -34,6 +34,7 @@ show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", True)
+show_debug = st.sidebar.checkbox("Show Candidate Points", False)
 
 uploaded_file = st.file_uploader("Upload your hunt area .KML or .KMZ", type=["kml", "kmz"])
 
@@ -96,7 +97,7 @@ def aspect_matches_wind(aspect, wind):
     return abs(aspect - expected) < 60
 
 def sample_features(slope, aspect, transform, geometry, patchcut, level):
-    buck_pins, doe_pins = [], []
+    buck_pins, doe_pins, debug_pts = [], [], []
     slope_thresh = (2, 35)
     flat_mask = slope < 3
     buck_mask = (slope > slope_thresh[0]) & (slope < slope_thresh[1])
@@ -118,6 +119,7 @@ def sample_features(slope, aspect, transform, geometry, patchcut, level):
         pt = Point(x, y)
         sl = slope[r][c]
         asp = aspect[r][c]
+        debug_pts.append(pt)
 
         if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind) and patchcut[r, c]:
             buck_pins.append(pt)
@@ -128,7 +130,7 @@ def sample_features(slope, aspect, transform, geometry, patchcut, level):
         if len(buck_pins) >= max_pins and len(doe_pins) >= max_pins:
             break
 
-    return buck_pins[:max_pins], doe_pins[:max_pins]
+    return buck_pins[:max_pins], doe_pins[:max_pins], debug_pts[:level * 30]
 
 def predict_funnels(pins):
     if len(pins) < 2:
@@ -147,8 +149,7 @@ def predict_funnels(pins):
 
 def generate_terrain_pins(geometry, wind, level, dem_path):
     slope, aspect, transform, patchcut = calculate_slope_aspect(dem_path, geometry)
-    buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, patchcut, level)
-st.write(f"Buck pins: {len(buck_pins)} | Doe pins: {len(doe_pins)} | Scrape pins: {len(scrape_pins)}")
+    buck_pins, doe_pins, debug_pts = sample_features(slope, aspect, transform, geometry, patchcut, level)
 
     scrape_pins = []
     if show_scrapes:
@@ -159,7 +160,7 @@ st.write(f"Buck pins: {len(buck_pins)} | Doe pins: {len(doe_pins)} | Scrape pins
                     scrape_pins.append(mid)
         scrape_pins = list(unary_union(scrape_pins).geoms) if scrape_pins else []
 
-    return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins)
+    return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins), debug_pts
 
 # --- Main Logic ---
 if uploaded_file:
@@ -171,7 +172,7 @@ if uploaded_file:
             if row.geometry.geom_type != "Polygon":
                 continue
             dem_path = fetch_opentopo_dem(row.geometry.bounds)
-            buck_pins, doe_pins, scrape_pins, funnels = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
+            buck_pins, doe_pins, scrape_pins, funnels, debug_pts = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
 
             all_layers = []
 
@@ -209,6 +210,15 @@ if uploaded_file:
                     get_path='path',
                     get_width=2,
                     get_color='[255, 165, 0]',
+                ))
+            if show_debug:
+                all_layers.append(pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"lat": p.y, "lon": p.x} for p in debug_pts],
+                    get_position='[lon, lat]',
+                    get_radius=3,
+                    get_color='[255, 255, 0]',
+                    pickable=False,
                 ))
 
             view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
