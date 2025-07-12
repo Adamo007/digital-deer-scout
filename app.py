@@ -148,6 +148,7 @@ def predict_funnels(pins):
 def generate_terrain_pins(geometry, wind, level, dem_path):
     slope, aspect, transform, patchcut = calculate_slope_aspect(dem_path, geometry)
     buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, patchcut, level)
+st.write(f"Buck pins: {len(buck_pins)} | Doe pins: {len(doe_pins)} | Scrape pins: {len(scrape_pins)}")
 
     scrape_pins = []
     if show_scrapes:
