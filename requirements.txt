@@ -5,4 +5,11 @@ simplekml
 Pillow
 opencv-python
 lxml
+streamlit
+geopandas
+shapely
+simplekml
+rasterio
+numpy
+elevation
 
