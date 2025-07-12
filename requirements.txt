@@ -1,0 +1,8 @@
+streamlit
+geopandas
+shapely
+simplekml
+Pillow
+opencv-python
+lxml
+
