@@ -15,9 +15,13 @@ import pydeck as pdk
 import matplotlib.pyplot as plt
 from sklearn.cluster import DBSCAN
 from rasterio.transform import rowcol
+from skimage.filters import sobel
+import PIL.Image as Image
+from io import BytesIO
+import base64
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
-st.title("🦌 Digital Deer Scout – Terrain AI")
+st.title("🪼 Digital Deer Scout – Terrain AI")
 
 # --- Sidebar UI ---
 st.sidebar.header("🧠 Scouting Parameters")
@@ -65,7 +69,7 @@ def calculate_slope_aspect(dem_path, geometry):
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation_data = out_image[0].astype(float)
 
-        elevation_data = gaussian_filter(elevation_data, sigma=1)
+        elevation_data = gaussian_filter(elevation_data, sigma=0.6)
         x, y = np.gradient(elevation_data)
         slope = np.sqrt(x * x + y * y)
         aspect = np.arctan2(-x, y) * 180 / np.pi
@@ -77,7 +81,9 @@ def calculate_slope_aspect(dem_path, geometry):
             ax.set_title("Topographic Elevation Map")
             st.pyplot(fig)
 
-    return slope, aspect, out_transform
+        patchcut = sobel(elevation_data) < 0.05
+
+    return slope, aspect, out_transform, patchcut
 
 def aspect_matches_wind(aspect, wind):
     wind_aspects = {
@@ -87,15 +93,14 @@ def aspect_matches_wind(aspect, wind):
     expected = wind_aspects.get(wind, 180)
     return abs(aspect - expected) < 45
 
-def sample_features(slope, aspect, transform, geometry, level):
+def sample_features(slope, aspect, transform, geometry, patchcut, level):
     buck_pins, doe_pins = [], []
-    slope_thresh = (5, 30)
+    slope_thresh = (3, 32)
     flat_mask = slope < 3
     buck_mask = (slope > slope_thresh[0]) & (slope < slope_thresh[1])
 
     rows, cols = slope.shape
     max_pins = level * 10
-    rng = np.random.default_rng(42)
 
     candidate_indices = [
         (r, c)
@@ -103,7 +108,6 @@ def sample_features(slope, aspect, transform, geometry, level):
         for c in range(5, cols - 5)
         if geometry.contains(Point(*rasterio.transform.xy(transform, r, c, offset='center')))
     ]
-    rng.shuffle(candidate_indices)
 
     for r, c in candidate_indices:
         x, y = rasterio.transform.xy(transform, r, c, offset='center')
@@ -111,12 +115,10 @@ def sample_features(slope, aspect, transform, geometry, level):
         sl = slope[r][c]
         asp = aspect[r][c]
 
-        if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind):
-            below = slope[min(rows - 1, r + 3)][c]
-            if below < sl:
-                buck_pins.append(pt)
+        if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind) and patchcut[r, c]:
+            buck_pins.append(pt)
 
-        elif show_doe_beds and flat_mask[r, c]:
+        elif show_doe_beds and flat_mask[r, c] and not patchcut[r, c]:
             doe_pins.append(pt)
 
         if len(buck_pins) >= max_pins and len(doe_pins) >= max_pins:
@@ -140,8 +142,8 @@ def predict_funnels(pins):
     return funnels
 
 def generate_terrain_pins(geometry, wind, level, dem_path):
-    slope, aspect, transform = calculate_slope_aspect(dem_path, geometry)
-    buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, level)
+    slope, aspect, transform, patchcut = calculate_slope_aspect(dem_path, geometry)
+    buck_pins, doe_pins = sample_features(slope, aspect, transform, geometry, patchcut, level)
 
     scrape_pins = []
     if show_scrapes:
@@ -153,105 +155,3 @@ def generate_terrain_pins(geometry, wind, level, dem_path):
         scrape_pins = list(unary_union(scrape_pins).geoms) if scrape_pins else []
 
     return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins)
-
-# --- Main Logic ---
-if uploaded_file:
-    gdf = extract_kml(uploaded_file)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".tif") as tmp_dem:
-        try:
-            bounds = gdf.total_bounds
-            fetch_opentopo_dem(bounds, tmp_dem.name)
-            dem_path = tmp_dem.name
-            st.success("✅ DEM fetched from OpenTopography")
-        except Exception as e:
-            st.error(f"❌ DEM fetch failed: {e}")
-            st.stop()
-
-    if st.button("🎯 Generate AI Pins"):
-        kml = Kml()
-        total_buck, total_doe, total_scrape = 0, 0, 0
-        buck_coords, doe_coords, scrape_coords, funnel_coords = [], [], [], []
-
-        for _, row in gdf.iterrows():
-            if isinstance(row.geometry, Polygon):
-                buck_pins, doe_pins, scrape_pins, funnels = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
-
-                for pt in buck_pins:
-                    kml.newpoint(name="Buck Bed", coords=[(pt.x, pt.y)])
-                    total_buck += 1
-                    buck_coords.append({"lat": pt.y, "lon": pt.x})
-
-                for pt in doe_pins:
-                    kml.newpoint(name="Doe Bed", coords=[(pt.x, pt.y)])
-                    total_doe += 1
-                    doe_coords.append({"lat": pt.y, "lon": pt.x})
-
-                for pt in scrape_pins:
-                    kml.newpoint(name="Scrape", coords=[(pt.x, pt.y)])
-                    total_scrape += 1
-                    scrape_coords.append({"lat": pt.y, "lon": pt.x})
-
-                for line in funnels:
-                    coords = list(line.coords)
-                    for i in range(len(coords)-1):
-                        ls = kml.newlinestring(name="Funnel", coords=[coords[i], coords[i+1]])
-                        funnel_coords.append({"lat": coords[i][1], "lon": coords[i][0], "type": "Funnel", "color": [0, 255, 255]})
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
-            kml.save(tmp.name)
-            st.download_button("📅 Download AI Pins (KML)", data=open(tmp.name, 'rb'), file_name="terrain_scouting.kml")
-
-        st.success(f"📌 Generated {total_buck} buck beds, {total_doe} doe beds, and {total_scrape} scrapes.")
-
-        # --- Interactive Visualization ---
-        st.subheader("📜 Interactive Pin Map Preview")
-        all_coords = []
-        for p in buck_coords:
-            p["type"] = "Buck Bed"
-            p["color"] = [255, 0, 0]
-            all_coords.append(p)
-        for p in doe_coords:
-            p["type"] = "Doe Bed"
-            p["color"] = [0, 255, 0]
-            all_coords.append(p)
-        for p in scrape_coords:
-            p["type"] = "Scrape"
-            p["color"] = [255, 255, 0]
-            all_coords.append(p)
-        for p in funnel_coords:
-            all_coords.append(p)
-
-        if all_coords:
-            st.pydeck_chart(pdk.Deck(
-                map_style="mapbox://styles/mapbox/satellite-streets-v11",
-                initial_view_state=pdk.ViewState(
-                    latitude=np.mean([p["lat"] for p in all_coords]),
-                    longitude=np.mean([p["lon"] for p in all_coords]),
-                    zoom=14,
-                    pitch=30,
-                ),
-                layers=[
-                    pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[p for p in all_coords if p["type"] != "Funnel"],
-                        get_position='[lon, lat]',
-                        get_color='color',
-                        get_radius=8,
-                        pickable=True,
-                    ),
-                    pdk.Layer(
-                        "PathLayer",
-                        data=[{
-                            "path": [[p["lon"], p["lat"]] for p in funnel_coords],
-                            "color": [0, 255, 255],
-                        }],
-                        get_path="path",
-                        get_color="color",
-                        width_scale=5,
-                        width_min_pixels=2,
-                    )
-                ],
-                tooltip={"text": "{type}"},
-                map_provider='mapbox',
-            ))
