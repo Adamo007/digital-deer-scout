@@ -14,6 +14,7 @@ from scipy.ndimage import gaussian_filter
 import pydeck as pdk
 import matplotlib.pyplot as plt
 from sklearn.cluster import DBSCAN
+from rasterio.transform import rowcol
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
@@ -93,28 +94,33 @@ def sample_features(slope, aspect, transform, geometry, level):
     buck_mask = (slope > slope_thresh[0]) & (slope < slope_thresh[1])
 
     rows, cols = slope.shape
-    step = max(1, int((rows * cols) / 2000))
-    max_pins = level * 8
+    max_pins = level * 10
+    rng = np.random.default_rng(42)
 
-    for r in range(0, rows, step):
-        for c in range(0, cols, step):
-            x, y = rasterio.transform.xy(transform, r, c, offset='center')
-            pt = Point(x, y)
+    candidate_indices = [
+        (r, c)
+        for r in range(5, rows - 5)
+        for c in range(5, cols - 5)
+        if geometry.contains(Point(*rasterio.transform.xy(transform, r, c, offset='center')))
+    ]
+    rng.shuffle(candidate_indices)
 
-            if not geometry.contains(pt):
-                continue
+    for r, c in candidate_indices:
+        x, y = rasterio.transform.xy(transform, r, c, offset='center')
+        pt = Point(x, y)
+        sl = slope[r][c]
+        asp = aspect[r][c]
 
-            sl = slope[r][c]
-            asp = aspect[r][c]
-
-            if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind):
+        if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind):
+            below = slope[min(rows - 1, r + 3)][c]
+            if below < sl:
                 buck_pins.append(pt)
 
-            elif show_doe_beds and flat_mask[r, c]:
-                doe_pins.append(pt)
+        elif show_doe_beds and flat_mask[r, c]:
+            doe_pins.append(pt)
 
-            if len(buck_pins) >= max_pins and len(doe_pins) >= max_pins:
-                break
+        if len(buck_pins) >= max_pins and len(doe_pins) >= max_pins:
+            break
 
     return buck_pins[:max_pins], doe_pins[:max_pins]
 
