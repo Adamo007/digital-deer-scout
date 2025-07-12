@@ -15,3 +15,4 @@ elevation
 requests
 rasterio
 numpy
+scipy
