@@ -98,7 +98,7 @@ def sample_features(slope, aspect, transform, geometry, level):
 
     for r in range(0, rows, step):
         for c in range(0, cols, step):
-            x, y = rasterio.transform.xy(transform, r, c)
+            x, y = rasterio.transform.xy(transform, r, c, offset='center')
             pt = Point(x, y)
 
             if not geometry.contains(pt):
@@ -199,7 +199,7 @@ if uploaded_file:
         st.success(f"📌 Generated {total_buck} buck beds, {total_doe} doe beds, and {total_scrape} scrapes.")
 
         # --- Interactive Visualization ---
-        st.subheader("🗺️ Interactive Pin Map Preview")
+        st.subheader("📜 Interactive Pin Map Preview")
         all_coords = []
         for p in buck_coords:
             p["type"] = "Buck Bed"
