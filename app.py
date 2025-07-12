@@ -178,6 +178,12 @@ if uploaded_file:
 
             all_layers = []
 
+            map_style = st.sidebar.selectbox("Map Style", [
+                "mapbox://styles/mapbox/satellite-v9",
+                "mapbox://styles/mapbox/outdoors-v11",
+                "mapbox://styles/adamo007/your-style-id"
+            ])
+
             if show_buck_beds:
                 all_layers.append(pdk.Layer(
                     "ScatterplotLayer",
@@ -224,7 +230,7 @@ if uploaded_file:
                 ))
 
             view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
-            st.pydeck_chart(pdk.Deck(map_style="mapbox://styles/mapbox/satellite-v9", initial_view_state=view_state, layers=all_layers))
+            st.pydeck_chart(pdk.Deck(map_style=map_style, initial_view_state=view_state, layers=all_layers))
 
             # --- KML Output ---
             kml = Kml()
