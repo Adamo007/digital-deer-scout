@@ -133,7 +133,7 @@ if uploaded_file:
             (wind == "NW" and (270 < a or a < 45))
         )
 
-        if show_buck_beds and 6 < s < 35 and not pc and wind_match:
+        if show_buck_beds and 6 < s < 35 and wind_match:
             buck_pts.append(pt)
         elif show_doe_beds and s < 4 and pc:
             doe_pts.append(pt)
@@ -166,7 +166,7 @@ if uploaded_file:
     if pins:
         df = pd.DataFrame(pins)
         st.pydeck_chart(pdk.Deck(
-            map_style="mapbox://styles/mapbox/satellite-streets-v12",
+            map_style="mapbox://styles/mapbox/satellite-v9",
             initial_view_state=pdk.ViewState(
                 latitude=np.mean(df.lat), longitude=np.mean(df.lon), zoom=15),
             layers=[
