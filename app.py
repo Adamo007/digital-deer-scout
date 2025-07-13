@@ -1,5 +1,6 @@
 import streamlit as st
 import geopandas as gpd
+import pandas as pd
 from shapely.geometry import Point
 from simplekml import Kml
 import tempfile
@@ -135,19 +136,16 @@ if uploaded_file:
             if b.distance(d) < 0.002:
                 scrape_pts.append(Point((b.x + d.x)/2, (b.y + d.y)/2))
 
-  import pandas as pd  # Add this at the top if not already imported
+    pins = []
+    if show_buck_beds:
+        pins += [{"lon": p.x, "lat": p.y, "type": "Buck Bed"} for p in buck_pts]
+    if show_doe_beds:
+        pins += [{"lon": p.x, "lat": p.y, "type": "Doe Bed"} for p in doe_pts]
+    if show_scrapes:
+        pins += [{"lon": p.x, "lat": p.y, "type": "Scrape"} for p in scrape_pts]
 
-pins = []
-if show_buck_beds:
-    pins += [{"lon": p.x, "lat": p.y, "type": "Buck Bed"} for p in buck_pts]
-if show_doe_beds:
-    pins += [{"lon": p.x, "lat": p.y, "type": "Doe Bed"} for p in doe_pts]
-if show_scrapes:
-    pins += [{"lon": p.x, "lat": p.y, "type": "Scrape"} for p in scrape_pts]
-
-if pins:
-    df = pd.DataFrame(pins)
-
+    if pins:
+        df = pd.DataFrame(pins)
         st.pydeck_chart(pdk.Deck(
             map_style="mapbox://styles/mapbox/satellite-v9",
             initial_view_state=pdk.ViewState(
