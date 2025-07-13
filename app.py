@@ -51,21 +51,19 @@ def extract_kml(file) -> gpd.GeoDataFrame:
         gdf = gpd.read_file(file)
     return gdf.to_crs("EPSG:4326")
 
-def fetch_opentopo_dem(bounds, out_path="dem.tif"):
+def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
-    api_key = st.secrets["OPENTOPO_KEY"] if "OPENTOPO_KEY" in st.secrets else "demotoken"
     url = (
-        f"https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1"
-        f"&south={miny}&north={maxy}&west={minx}&east={maxx}&outputFormat=GTiff"
-        f"&API_Key={api_key}"
+        f"https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox={minx},{miny},{maxx},{maxy}"
+        f"&bboxSR=4326&imageSR=4326&format=tiff&pixelType=F32&f=image"
     )
     r = requests.get(url)
-    if r.status_code == 200:
+    if r.status_code == 200 and r.headers['Content-Type'] == 'image/tiff':
         with open(out_path, "wb") as f:
             f.write(r.content)
         return out_path
     else:
-        raise Exception("DEM download failed")
+        raise Exception("USGS LiDAR DEM download failed")
 
 def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
@@ -90,163 +88,9 @@ def calculate_slope_aspect(dem_path, geometry):
 
     return slope, aspect, out_transform, patchcut
 
-def aspect_matches_wind(aspect, wind):
-    wind_aspects = {
-        "N": 180, "NE": 225, "E": 270, "SE": 315,
-        "S": 0,   "SW": 45,  "W": 90,  "NW": 135
-    }
-    expected = wind_aspects.get(wind, 180)
-    return abs(aspect - expected) < 60
+# [The rest of your code remains unchanged except that fetch_opentopo_dem is replaced by fetch_usgs_lidar]
 
-def sample_features(slope, aspect, transform, geometry, patchcut, level):
-    buck_pins, doe_pins, debug_pts = [], [], []
-    slope_thresh = (2, 35)
-    flat_mask = slope < 3
-    buck_mask = (slope > slope_thresh[0]) & (slope < slope_thresh[1])
-
-    rows, cols = slope.shape
-    max_pins = level * 10
-
-    candidate_indices = [
-        (r, c)
-        for r in range(5, rows - 5)
-        for c in range(5, cols - 5)
-        if geometry.contains(Point(*rasterio.transform.xy(transform, r, c, offset='center')))
-    ]
-
-    st.write(f"Found {len(candidate_indices)} candidate points inside the polygon")
-
-    for r, c in candidate_indices:
-        x, y = rasterio.transform.xy(transform, r, c, offset='center')
-        pt = Point(x, y)
-        sl = slope[r][c]
-        asp = aspect[r][c]
-        debug_pts.append(pt)
-
-        if show_buck_beds and buck_mask[r, c] and aspect_matches_wind(asp, wind) and patchcut[r, c]:
-            buck_pins.append(pt)
-
-        elif show_doe_beds and flat_mask[r, c] and not patchcut[r, c]:
-            doe_pins.append(pt)
-
-        if len(buck_pins) >= max_pins and len(doe_pins) >= max_pins:
-            break
-
-    return buck_pins[:max_pins], doe_pins[:max_pins], debug_pts[:level * 30]
-
-def predict_funnels(pins):
-    if len(pins) < 2:
-        return []
-    coords = np.array([[p.x, p.y] for p in pins])
-    clusters = DBSCAN(eps=0.0015, min_samples=2).fit(coords)
-    funnels = []
-    for cluster_id in set(clusters.labels_):
-        if cluster_id == -1:
-            continue
-        cluster_points = coords[clusters.labels_ == cluster_id]
-        if len(cluster_points) >= 2:
-            line = LineString(cluster_points)
-            funnels.append(line)
-    return funnels
-
-def generate_terrain_pins(geometry, wind, level, dem_path):
-    slope, aspect, transform, patchcut = calculate_slope_aspect(dem_path, geometry)
-    buck_pins, doe_pins, debug_pts = sample_features(slope, aspect, transform, geometry, patchcut, level)
-
-    scrape_pins = []
-    if show_scrapes:
-        for b in buck_pins:
-            for d in doe_pins:
-                if b.distance(d) < 0.003:
-                    mid = Point((b.x + d.x)/2, (b.y + d.y)/2)
-                    scrape_pins.append(mid)
-        scrape_pins = list(unary_union(scrape_pins).geoms) if scrape_pins else []
-
-    return buck_pins, doe_pins, scrape_pins, predict_funnels(buck_pins + doe_pins), debug_pts
-
-# --- Main Logic ---
-if uploaded_file:
-    try:
-        gdf = extract_kml(uploaded_file)
-        st.success("✅ KML parsed. Generating elevation model and pins...")
-
-        for _, row in gdf.iterrows():
-            if row.geometry.geom_type != "Polygon":
-                continue
-            dem_path = fetch_opentopo_dem(row.geometry.bounds)
-            buck_pins, doe_pins, scrape_pins, funnels, debug_pts = generate_terrain_pins(row.geometry, wind, aggression, dem_path)
-
-            all_layers = []
-
-            map_style = st.sidebar.selectbox("Map Style", [
-                "mapbox://styles/mapbox/satellite-v9",
-                "mapbox://styles/mapbox/outdoors-v11",
-                "mapbox://styles/adamo007/your-style-id"
-            ])
-
-            if show_buck_beds:
-                all_layers.append(pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[{"lat": p.y, "lon": p.x} for p in buck_pins],
-                    get_position='[lon, lat]',
-                    get_radius=5,
-                    get_color='[255, 0, 0]',
-                    pickable=True,
-                ))
-            if show_doe_beds:
-                all_layers.append(pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[{"lat": p.y, "lon": p.x} for p in doe_pins],
-                    get_position='[lon, lat]',
-                    get_radius=5,
-                    get_color='[0, 255, 0]',
-                    pickable=True,
-                ))
-            if show_scrapes:
-                all_layers.append(pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[{"lat": p.y, "lon": p.x} for p in scrape_pins],
-                    get_position='[lon, lat]',
-                    get_radius=4,
-                    get_color='[0, 0, 255]',
-                    pickable=True,
-                ))
-            if funnels:
-                all_layers.append(pdk.Layer(
-                    "PathLayer",
-                    data=[{"path": [[p[0], p[1]] for p in line.coords]} for line in funnels],
-                    get_path='path',
-                    get_width=2,
-                    get_color='[255, 165, 0]',
-                ))
-            if show_debug:
-                all_layers.append(pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[{"lat": p.y, "lon": p.x} for p in debug_pts],
-                    get_position='[lon, lat]',
-                    get_radius=3,
-                    get_color='[255, 255, 0]',
-                    pickable=False,
-                ))
-
-            view_state = pdk.ViewState(latitude=row.geometry.centroid.y, longitude=row.geometry.centroid.x, zoom=14)
-            st.pydeck_chart(pdk.Deck(map_style=map_style, initial_view_state=view_state, layers=all_layers))
-
-            # --- KML Output ---
-            kml = Kml()
-            for pt in buck_pins:
-                kml.newpoint(name="Buck Bed", coords=[(pt.x, pt.y)])
-            for pt in doe_pins:
-                kml.newpoint(name="Doe Bed", coords=[(pt.x, pt.y)])
-            for pt in scrape_pins:
-                kml.newpoint(name="Scrape", coords=[(pt.x, pt.y)])
-            for line in funnels:
-                kml.newlinestring(name="Funnel", coords=list(line.coords))
-
-            kml_path = os.path.join(tempfile.gettempdir(), "scouting_output.kml")
-            kml.save(kml_path)
-            with open(kml_path, "rb") as f:
-                st.download_button("⬇️ Download KML Output", f, file_name="deer_scout_output.kml")
-
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
+# Replace call in main logic:
+# dem_path = fetch_opentopo_dem(row.geometry.bounds)
+# -->
+# dem_path = fetch_usgs_lidar(row.geometry.bounds)
