@@ -60,6 +60,8 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     if r.status_code == 200 and r.headers["Content-Type"] == "image/tiff":
         with open(out_path, "wb") as f:
             f.write(r.content)
+        if os.path.getsize(out_path) < 1024:
+            raise Exception("DEM download resulted in an empty file")
         return out_path
     else:
         raise Exception("DEM download failed")
@@ -70,13 +72,15 @@ def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation = out_image[0].astype(float)
-        elevation = gaussian_filter(elevation, sigma=0.75)
 
+        if np.all(elevation == 0):
+            raise Exception("DEM data appears to be flat or invalid")
+
+        elevation = gaussian_filter(elevation, sigma=0.75)
         dx, dy = np.gradient(elevation)
         slope = np.sqrt(dx**2 + dy**2)
         aspect = np.arctan2(-dx, dy) * 180 / np.pi
         aspect = np.where(aspect < 0, 360 + aspect, aspect)
-
         patchcut = sobel(elevation) < 0.04
 
         if show_topo:
@@ -102,6 +106,7 @@ if uploaded_file:
             dem_path = tiff_file.name
         else:
             dem_path = fetch_usgs_lidar(poly.bounds)
+        st.success("✅ DEM successfully fetched.")
     except Exception as e:
         st.error(f"DEM fetch failed: {e}")
         st.stop()
@@ -112,6 +117,8 @@ if uploaded_file:
     candidate_pts = [Point(x, y) for x in np.arange(poly.bounds[0], poly.bounds[2], step)
                      for y in np.arange(poly.bounds[1], poly.bounds[3], step)
                      if poly.contains(Point(x, y))]
+
+    st.write(f"✅ Found {len(candidate_pts)} candidate points.")
 
     buck_pts, doe_pts, scrape_pts, funnels = [], [], [], []
 
@@ -143,7 +150,6 @@ if uploaded_file:
             if b.distance(d) < 0.002:
                 scrape_pts.append(Point((b.x + d.x)/2, (b.y + d.y)/2))
 
-    # Funnel detection (gradient of elevation > threshold)
     edge_img = sobel(elevation)
     funnel_threshold = np.percentile(edge_img, 97)
     funnel_indices = np.argwhere(edge_img > funnel_threshold)
