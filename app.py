@@ -70,7 +70,7 @@ def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation = out_image[0].astype(float)
-        elevation = gaussian_filter(elevation, sigma=0.5)
+        elevation = gaussian_filter(elevation, sigma=0.75)
 
         dx, dy = np.gradient(elevation)
         slope = np.sqrt(dx**2 + dy**2)
@@ -101,7 +101,7 @@ if uploaded_file:
 
     slope, aspect, transform, patchcut = calculate_slope_aspect(dem_path, poly)
 
-    step = (poly.bounds[2] - poly.bounds[0]) / (aggression * 15)
+    step = (poly.bounds[2] - poly.bounds[0]) / (aggression * 25)
     candidate_pts = [Point(x, y) for x in np.arange(poly.bounds[0], poly.bounds[2], step)
                      for y in np.arange(poly.bounds[1], poly.bounds[3], step)
                      if poly.contains(Point(x, y))]
@@ -126,7 +126,7 @@ if uploaded_file:
             (wind == "NW" and (270 < a or a < 45))
         )
 
-        if show_buck_beds and 5 < s < 30 and not pc and wind_match:
+        if show_buck_beds and 6 < s < 35 and not pc and wind_match:
             buck_pts.append(pt)
         elif show_doe_beds and s < 4 and not pc:
             doe_pts.append(pt)
