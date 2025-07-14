@@ -17,7 +17,6 @@ from skimage.filters import sobel
 import base64
 from shapely.geometry import LineString
 
-# Streamlit UI
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
 
@@ -31,10 +30,10 @@ show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
 custom_tiff = st.sidebar.file_uploader("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
-
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
 
-# Helper: Load KML
+# Load KML/KMZ
+
 def extract_kml(file) -> gpd.GeoDataFrame:
     if file.name.endswith(".kmz"):
         with ZipFile(file) as zf:
@@ -45,7 +44,8 @@ def extract_kml(file) -> gpd.GeoDataFrame:
         gdf = gpd.read_file(file)
     return gdf.to_crs("EPSG:4326")
 
-# Helper: Download USGS DEM with fallback
+# USGS DEM Fetch
+
 def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
     url = (
@@ -61,7 +61,8 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
         return out_path
     raise Exception("USGS DEM download failed")
 
-# Helper: Analyze Slope/Aspect
+# Slope & Aspect
+
 def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
         out_image, out_transform = mask(src, [geometry], crop=True)
@@ -79,14 +80,13 @@ def calculate_slope_aspect(dem_path, geometry):
 
         return slope, aspect, out_transform, patchcut, elevation
 
-# Main Logic
+# Main
 if uploaded_file:
     gdf = extract_kml(uploaded_file)
     poly = gdf.geometry.iloc[0]
 
     st.write("Fetching DEM...")
     try:
-        dem_path = None
         if custom_tiff is not None:
             tiff_file = tempfile.NamedTemporaryFile(delete=False, suffix=".tif")
             tiff_file.write(custom_tiff.read())
@@ -100,7 +100,6 @@ if uploaded_file:
         st.stop()
 
     slope, aspect, transform, patchcut, elevation = calculate_slope_aspect(dem_path, poly)
-
     step = (poly.bounds[2] - poly.bounds[0]) / (aggression * 25)
     candidate_pts = [Point(x, y) for x in np.arange(poly.bounds[0], poly.bounds[2], step)
                      for y in np.arange(poly.bounds[1], poly.bounds[3], step)
@@ -129,7 +128,7 @@ if uploaded_file:
         if show_buck_beds and 8 < s < 35 and wind_match and not pc:
             buck_pts.append(pt)
         elif show_doe_beds and s < 3 and pc:
-            if np.random.rand() < 0.015 * aggression:
+            if np.random.rand() < 0.0075 * aggression:
                 doe_pts.append(pt)
 
     for b in buck_pts:
@@ -159,7 +158,7 @@ if uploaded_file:
     if pins:
         df = pd.DataFrame(pins)
         st.pydeck_chart(pdk.Deck(
-            map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+            map_style="https://gisweb.co.aitkin.mn.us/arcgis/services/2023PictometryImagery/MapServer/WMSServer",
             initial_view_state=pdk.ViewState(
                 latitude=np.mean(df.lat), longitude=np.mean(df.lon), zoom=15),
             layers=[
