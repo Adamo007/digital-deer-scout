@@ -9,3 +9,4 @@ pydeck>=0.9.1
 requests>=2.32.3
 sentinelhub>=3.10.2
 scikit-image>=0.24.0
+
