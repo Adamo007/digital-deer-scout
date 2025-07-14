@@ -49,7 +49,8 @@ def extract_kml(file) -> gpd.GeoDataFrame:
         gdf = gpd.read_file(file)
     return gdf.to_crs("EPSG:4326")
 
-# Helper: Download USGS DEM
+# Helper: Download USGS DEM with fallback
+
 def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
     url = (
@@ -57,14 +58,13 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
         f"&bboxSR=4326&imageSR=4326&format=tiff&pixelType=F32&f=image"
     )
     r = requests.get(url)
-    if r.status_code == 200 and r.headers["Content-Type"] == "image/tiff":
+    if r.status_code == 200 and r.headers.get("Content-Type") == "image/tiff":
         with open(out_path, "wb") as f:
             f.write(r.content)
-        if os.path.getsize(out_path) < 1024:
+        if os.path.getsize(out_path) < 2048:
             raise Exception("DEM download resulted in an empty file")
         return out_path
-    else:
-        raise Exception("DEM download failed")
+    raise Exception("USGS DEM download failed")
 
 # Helper: Analyze Slope/Aspect
 
@@ -179,7 +179,7 @@ if uploaded_file:
                 pdk.Layer("ScatterplotLayer",
                           data=df,
                           get_position='[lon, lat]',
-                          get_color='[200, 30, 0, 160]',
+                          get_color="[255, 0, 0, 160]",
                           get_radius=2,
                           pickable=True)
             ]))
