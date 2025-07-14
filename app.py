@@ -29,7 +29,7 @@ show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
-custom_tiff = st.sidebar.file_uploads("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
+custom_tiff = st.sidebar.file_uploader("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
 
 def extract_kml(file) -> gpd.GeoDataFrame:
