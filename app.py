@@ -29,25 +29,34 @@ show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
-custom_tiff = st.sidebar.file_uploader("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
+custom_tiff = st.sidebar.file_uploads("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
 
-# Load KML/KMZ
-
 def extract_kml(file) -> gpd.GeoDataFrame:
-    if file.name.endswith(".kmz"):
-        with ZipFile(file) as zf:
-            kml_file = [f for f in zf.namelist() if f.endswith(".kml")][0]
-            with zf.open(kml_file) as kmldata:
-                gdf = gpd.read_file(kmldata)
-    else:
-        gdf = gpd.read_file(file)
-    return gdf.to_crs("EPSG:4326")
-
-# USGS DEM Fetch
+    try:
+        if file.name.endswith(".kmz"):
+            with ZipFile(file) as zf:
+                kml_file = [f for f in zf.namelist() if f.endswith(".kml")]
+                if not kml_file:
+                    st.error("No KML file found in KMZ")
+                    st.stop()
+                with zf.open(kml_file[0]) as kmldata:
+                    gdf = gpd.read_file(kmldata)
+        else:
+            gdf = gpd.read_file(file)
+        if gdf.empty or not gdf.geometry.iloc[0].is_valid:
+            st.error("Invalid or empty KML/KMZ geometry")
+            st.stop()
+        return gdf.to_crs("EPSG:4326")
+    except Exception as e:
+        st.error(f"KML/KMZ parsing failed: {e}")
+        st.stop()
 
 def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
+    if (maxx - minx) > 1 or (maxy - miny) > 1:
+        st.error("Bounding box too large for USGS DEM fetch")
+        st.stop()
     url = (
         f"https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox={minx},{miny},{maxx},{maxy}"
         f"&bboxSR=4326&imageSR=4326&format=tiff&pixelType=F32&f=image"
@@ -57,18 +66,16 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
         with open(out_path, "wb") as f:
             f.write(r.content)
         if os.path.getsize(out_path) < 2048:
-            raise Exception("DEM download resulted in an empty file")
+            raiseകException("DEM download resulted in an empty file")
         return out_path
     raise Exception("USGS DEM download failed")
-
-# Slope & Aspect
 
 def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
         out_image, out_transform = mask(src, [geometry], crop=True)
         elevation = out_image[0].astype(float)
 
-        if np.all(elevation == 0):
+        if np.all(elevation == 0) or elevation.max() - elevation.min() < 1:
             raise Exception("DEM data appears to be flat or invalid")
 
         elevation = gaussian_filter(elevation, sigma=0.75)
@@ -76,14 +83,14 @@ def calculate_slope_aspect(dem_path, geometry):
         slope = np.sqrt(dx**2 + dy**2)
         aspect = np.arctan2(-dx, dy) * 180 / np.pi
         aspect = np.where(aspect < 0, 360 + aspect, aspect)
-        patchcut = sobel(elevation) < 0.04
+        patchcut = sobel(elevation) < 0.08  # Adjusted threshold
 
         return slope, aspect, out_transform, patchcut, elevation
 
-# Main
 if uploaded_file:
     gdf = extract_kml(uploaded_file)
     poly = gdf.geometry.iloc[0]
+    st.write(f"Boundary bounds: {poly.bounds}")
 
     st.write("Fetching DEM...")
     try:
@@ -100,17 +107,26 @@ if uploaded_file:
         st.stop()
 
     slope, aspect, transform, patchcut, elevation = calculate_slope_aspect(dem_path, poly)
-    step = (poly.bounds[2] - poly.bounds[0]) / (aggression * 25)
-    candidate_pts = [Point(x, y) for x in np.arange(poly.bounds[0], poly.bounds[2], step)
-                     for y in np.arange(poly.bounds[1], poly.bounds[3], step)
-                     if poly.contains(Point(x, y))]
+    st.write(f"Elevation range: {elevation.min()} to {elevation.max()}")
+    st.write(f"Aspect range: {aspect.min()} to {aspect.max()}")
+
+    step = max((poly.bounds[2] - poly.bounds[0]) / (aggression * 10), 0.0001)
+    candidate_pts = [
+        Point(x, y) for x in np.arange(poly.bounds[0], poly.bounds[2], step)
+        for y in np.arange(poly.bounds[1], poly.bounds[3], step)
+        if poly.contains(Point(x, y))
+    ]
 
     buck_pts, doe_pts, scrape_pts, funnels = [], [], [], []
+
+    elev_range = elevation.max() - elevation.min()
+    elev_threshold = (elevation.min() + elev_range * 0.33, elevation.min() + elev_range * 0.66)
 
     for pt in candidate_pts:
         row, col = rowcol(transform, pt.x, pt.y)
         try:
             s, a, pc = slope[row, col], aspect[row, col], patchcut[row, col]
+            elev = elevation[row, col]
         except:
             continue
 
@@ -125,19 +141,19 @@ if uploaded_file:
             (wind == "NW" and (270 < a or a < 45))
         )
 
-        if show_buck_beds and 8 < s < 35 and wind_match and not pc:
+        if show_buck_beds and 10 < s < 30 and wind_match and elev_threshold[0] < elev < elev_threshold[1]:
             buck_pts.append(pt)
-        elif show_doe_beds and s < 3 and pc:
-            if np.random.rand() < 0.0075 * aggression:
-                doe_pts.append(pt)
+        elif show_doe_beds and s < 5:
+            doe_pts.append(pt)
 
     for b in buck_pts:
         for d in doe_pts:
-            if b.distance(d) < 0.002:
-                scrape_pts.append(Point((b.x + d.x)/2, (b.y + d.y)/2))
+            if 0.001 < b.distance(d) < 0.005:
+                line = LineString([b, d])
+                scrape_pts.append(line.interpolate(line.length * 0.5))
 
     edge_img = sobel(elevation)
-    funnel_threshold = np.percentile(edge_img, 97)
+    funnel_threshold = np.percentile(edge_img, 95)  # Adjusted threshold
     funnel_indices = np.argwhere(edge_img > funnel_threshold)
     for idx in funnel_indices:
         row, col = idx
@@ -152,33 +168,4 @@ if uploaded_file:
     if show_doe_beds:
         pins += [{"lon": p.x, "lat": p.y, "type": "Doe Bed", "color": [255, 255, 0]} for p in doe_pts]
     if show_scrapes:
-        pins += [{"lon": p.x, "lat": p.y, "type": "Scrape", "color": [200, 0, 200]} for p in scrape_pts]
-    pins += [{"lon": p.x, "lat": p.y, "type": "Funnel", "color": [0, 128, 255]} for p in funnels]
-
-    if pins:
-        df = pd.DataFrame(pins)
-        st.pydeck_chart(pdk.Deck(
-            map_style="https://gisweb.co.aitkin.mn.us/arcgis/services/2023PictometryImagery/MapServer/WMSServer",
-            initial_view_state=pdk.ViewState(
-                latitude=np.mean(df.lat), longitude=np.mean(df.lon), zoom=15),
-            layers=[
-                pdk.Layer("ScatterplotLayer",
-                          data=df,
-                          get_position='[lon, lat]',
-                          get_color='color',
-                          get_radius=2,
-                          pickable=True)
-            ]))
-
-        if st.button("Export KML"):
-            kml = Kml()
-            for _, r in df.iterrows():
-                kml.newpoint(name=r['type'], coords=[(r['lon'], r['lat'])])
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".kml")
-            kml.save(tmp.name)
-            with open(tmp.name, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            href = f'<a href="data:application/octet-stream;base64,{b64}" download="scout_output.kml">Download KML</a>'
-            st.markdown(href, unsafe_allow_html=True)
-    else:
-        st.warning("No pins were generated.")
+        pins
