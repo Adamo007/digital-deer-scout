@@ -12,14 +12,10 @@ from zipfile import ZipFile
 import requests
 from scipy.ndimage import gaussian_filter
 import pydeck as pdk
-import matplotlib.pyplot as plt
 from rasterio.transform import rowcol
 from skimage.filters import sobel
 import base64
 from shapely.geometry import LineString
-
-# Mapbox API Key
-pdk.settings.mapbox_api_key = "pk.eyJ1IjoiYWRhbW8wMDciLCJhIjoiY21kMGNpcms2MTlvaTJscHppNmdtNzRzYyJ9.5g_goxXeEETGRnsTX7y7OA"
 
 # Streamlit UI
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
@@ -33,7 +29,7 @@ aggression = st.sidebar.slider("Pin Aggression Level", 1, 10, 3)
 show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
-show_topo = st.sidebar.checkbox("Show Topographic Overlay", True)
+show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
 custom_tiff = st.sidebar.file_uploader("Optional: Upload your own GeoTIFF (DEM)", type=["tif", "tiff"])
 
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
@@ -50,7 +46,6 @@ def extract_kml(file) -> gpd.GeoDataFrame:
     return gdf.to_crs("EPSG:4326")
 
 # Helper: Download USGS DEM with fallback
-
 def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     minx, miny, maxx, maxy = bounds
     url = (
@@ -67,7 +62,6 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     raise Exception("USGS DEM download failed")
 
 # Helper: Analyze Slope/Aspect
-
 def calculate_slope_aspect(dem_path, geometry):
     with rasterio.open(dem_path) as src:
         out_image, out_transform = mask(src, [geometry], crop=True)
@@ -82,12 +76,6 @@ def calculate_slope_aspect(dem_path, geometry):
         aspect = np.arctan2(-dx, dy) * 180 / np.pi
         aspect = np.where(aspect < 0, 360 + aspect, aspect)
         patchcut = sobel(elevation) < 0.04
-
-        if show_topo:
-            fig, ax = plt.subplots()
-            ax.imshow(elevation, cmap='terrain')
-            ax.set_title("Topographic Elevation Map")
-            st.pyplot(fig)
 
         return slope, aspect, out_transform, patchcut, elevation
 
@@ -118,8 +106,6 @@ if uploaded_file:
                      for y in np.arange(poly.bounds[1], poly.bounds[3], step)
                      if poly.contains(Point(x, y))]
 
-    st.write(f"✅ Found {len(candidate_pts)} candidate points.")
-
     buck_pts, doe_pts, scrape_pts, funnels = [], [], [], []
 
     for pt in candidate_pts:
@@ -140,10 +126,11 @@ if uploaded_file:
             (wind == "NW" and (270 < a or a < 45))
         )
 
-        if show_buck_beds and 6 < s < 35 and wind_match:
+        if show_buck_beds and 8 < s < 35 and wind_match and not pc:
             buck_pts.append(pt)
-        elif show_doe_beds and s < 4 and pc:
-            doe_pts.append(pt)
+        elif show_doe_beds and s < 3 and pc:
+            if np.random.rand() < 0.015 * aggression:
+                doe_pts.append(pt)
 
     for b in buck_pts:
         for d in doe_pts:
@@ -162,24 +149,24 @@ if uploaded_file:
 
     pins = []
     if show_buck_beds:
-        pins += [{"lon": p.x, "lat": p.y, "type": "Buck Bed"} for p in buck_pts]
+        pins += [{"lon": p.x, "lat": p.y, "type": "Buck Bed", "color": [255, 0, 0]} for p in buck_pts]
     if show_doe_beds:
-        pins += [{"lon": p.x, "lat": p.y, "type": "Doe Bed"} for p in doe_pts]
+        pins += [{"lon": p.x, "lat": p.y, "type": "Doe Bed", "color": [255, 255, 0]} for p in doe_pts]
     if show_scrapes:
-        pins += [{"lon": p.x, "lat": p.y, "type": "Scrape"} for p in scrape_pts]
-    pins += [{"lon": p.x, "lat": p.y, "type": "Funnel"} for p in funnels]
+        pins += [{"lon": p.x, "lat": p.y, "type": "Scrape", "color": [200, 0, 200]} for p in scrape_pts]
+    pins += [{"lon": p.x, "lat": p.y, "type": "Funnel", "color": [0, 128, 255]} for p in funnels]
 
     if pins:
         df = pd.DataFrame(pins)
         st.pydeck_chart(pdk.Deck(
-            map_style="mapbox://styles/mapbox/satellite-v9",
+            map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
             initial_view_state=pdk.ViewState(
                 latitude=np.mean(df.lat), longitude=np.mean(df.lon), zoom=15),
             layers=[
                 pdk.Layer("ScatterplotLayer",
                           data=df,
                           get_position='[lon, lat]',
-                          get_color="[255, 0, 0, 160]",
+                          get_color='color',
                           get_radius=2,
                           pickable=True)
             ]))
