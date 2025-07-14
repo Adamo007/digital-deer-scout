@@ -23,13 +23,13 @@ st.title("🦌 Digital Deer Scout – Terrain AI")
 st.sidebar.header("🧠 Scouting Parameters")
 wind = st.sidebar.selectbox("Wind Direction", ["NW", "W", "SW", "S", "SE", "E", "NE", "N"])
 phase = st.sidebar.selectbox("Target Phase", ["Early Season", "Pre-Rut", "Rut"])
-aggression = st.sidebar.slider("Pin Aggression Level", 1, 10, 3)
+aggression = st.sidebar.slider("Pin Aggression Level", 1, 10, 5)
 show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_funnels = st.sidebar.checkbox("Show Funnels", True)
 show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
-show_ndvi_heatmap = st.sidebar.checkbox("Show NDVI Heatmap", False)
+show_ndvi_heatmap = st.sidebar.checkbox("Show NDVI Heatmap", True)
 custom_tiff = st.sidebar.file_uploader("Upload GeoTIFF (DEM)", type=["tif", "tiff"])
 custom_ndvi = st.sidebar.file_uploader("Upload NDVI GeoTIFF (optional)", type=["tif", "tiff"])
 sentinelhub_token = st.sidebar.text_input("Sentinel Hub API Token (optional, for NDVI fetch)")
@@ -77,8 +77,8 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
 # NDVI Fetch from Sentinel-2
 def fetch_sentinel_ndvi(bounds, token, out_path="ndvi.tif"):
     if not token:
-        st.error("Sentinel Hub API token required for NDVI fetch")
-        st.stop()
+        st.warning("No Sentinel Hub token provided. Skipping NDVI fetch.")
+        return None
     config = SHConfig()
     config.sh_client_id = token
     config.sh_client_secret = token
@@ -96,18 +96,22 @@ def fetch_sentinel_ndvi(bounds, token, out_path="ndvi.tif"):
             return [ndvi];
         }
     """
-    request = SentinelHubRequest(
-        evalscript=evalscript,
-        input_data=[SentinelHubRequest.input_data(data_collection=DataCollection.SENTINEL2_L2A)],
-        responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
-        bbox=bbox,
-        size=(256, 256),
-        config=config
-    )
-    response = request.get_data(save_data=True, save_path=out_path)
-    if response and os.path.exists(out_path):
-        return out_path
-    raise Exception("Sentinel-2 NDVI fetch failed")
+    try:
+        request = SentinelHubRequest(
+            evalscript=evalscript,
+            input_data=[SentinelHubRequest.input_data(data_collection=DataCollection.SENTINEL2_L2A)],
+            responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
+            bbox=bbox,
+            size=(256, 256),
+            config=config
+        )
+        response = request.get_data(save_data=True, save_path=out_path)
+        if response and os.path.exists(out_path):
+            return out_path
+        raise Exception("Sentinel-2 NDVI fetch failed")
+    except Exception as e:
+        st.error(f"NDVI fetch failed: {e}. Proceeding without NDVI.")
+        return None
 
 # Slope, Aspect, TPI, and NDVI Processing
 def calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, geometry):
@@ -119,18 +123,21 @@ def calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, geometry):
                 raise Exception("DEM data appears to be flat or invalid")
             elevation = gaussian_filter(elevation, sigma=0.75)
             dx, dy = np.gradient(elevation)
-            slope = np.degrees(np.sqrt(dx**2 + dy**2))  # Convert to degrees
+            slope = np.degrees(np.sqrt(dx**2 + dy**2))
             aspect = np.arctan2(-dx, dy) * 180 / np.pi
             aspect = np.where(aspect < 0, 360 + aspect, aspect)
             patchcut = sobel(elevation) < 0.08
-            tpi = elevation - gaussian_filter(elevation, sigma=5)  # Topographic Position Index
+            tpi = elevation - gaussian_filter(elevation, sigma=5)
 
         if ndvi_path:
             with rasterio.open(ndvi_path) as src:
                 out_image, _ = mask(src, [geometry], crop=True)
                 ndvi = out_image[0].astype(float)
-                ndvi = np.where(np.isnan(ndvi), 0, ndvi)  # Replace NaN with 0
-                ndvi = gaussian_filter(ndvi, sigma=0.75)  # Smooth NDVI
+                ndvi = np.where(np.isnan(ndvi), 0, ndvi)
+                ndvi = gaussian_filter(ndvi, sigma=0.75)
+                if np.all(ndvi == 0):
+                    st.warning("NDVI data is all zero. Skipping NDVI.")
+                    ndvi = None
         else:
             ndvi = None
 
@@ -145,6 +152,10 @@ if uploaded_file:
     gdf = extract_kml(uploaded_file)
     poly = gdf.geometry.iloc[0]
     st.write(f"Boundary bounds: {poly.bounds}")
+
+    # Calculate area in km² for density check
+    area_km2 = poly.area * 111.32 * 111.32  # Approx km² (1° ≈ 111.32 km)
+    st.write(f"Boundary area: {area_km2:.2f} km²")
 
     # Fetch or Load DEM
     st.write("Fetching DEM...")
@@ -169,11 +180,8 @@ if uploaded_file:
             ndvi_file.write(custom_ndvi.read())
             ndvi_file.close()
             ndvi_path = ndvi_file.name
-        elif sentinelhub_token:
-            ndvi_path = fetch_sentinel_ndvi(poly.bounds, sentinelhub_token)
         else:
-            st.warning("No NDVI data provided. Skipping vegetation analysis.")
-            ndvi_path = None
+            ndvi_path = fetch_sentinel_ndvi(poly.bounds, sentinelhub_token)
         st.success("✅ NDVI successfully fetched or skipped.")
     except Exception as e:
         st.error(f"NDVI fetch failed: {e}. Proceeding without NDVI.")
@@ -181,36 +189,40 @@ if uploaded_file:
 
     # Process Terrain and NDVI
     slope, aspect, transform, patchcut, elevation, ndvi, tpi = calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, poly)
-    st.write(f"Elevation range: {elevation.min()} to {elevation.max()}")
-    st.write(f"Aspect range: {aspect.min()} to {aspect.max()}")
-    st.write(f"Slope range: {slope.min()} to {slope.max()}")
+    st.write(f"Elevation range: {elevation.min():.2f} to {elevation.max():.2f}")
+    st.write(f"Aspect range: {aspect.min():.2f} to {aspect.max():.2f}")
+    st.write(f"Slope range: {slope.min():.2f} to {slope.max():.2f}")
     if ndvi is not None:
-        st.write(f"NDVI range: {ndvi.min()} to {ndvi.max()}")
-    st.write(f"TPI range: {tpi.min()} to {tpi.max()}")
+        st.write(f"NDVI range: {ndvi.min():.2f} to {ndvi.max():.2f}")
+    else:
+        st.write("No NDVI data available.")
+    st.write(f"TPI range: {tpi.min():.2f} to {tpi.max():.2f}")
 
     # Generate Candidate Points with Jitter
-    step = max((poly.bounds[2] - poly.bounds[0]) / (aggression * 15), 0.00005)  # Finer grid
+    step = max((poly.bounds[2] - poly.bounds[0]) / (aggression * 30), 0.00002)
     candidate_pts = [
-        Point(x + np.random.uniform(-step/4, step/4), y + np.random.uniform(-step/4, step/4))
+        Point(x + np.random.uniform(-step, step), y + np.random.uniform(-step, step))
         for x in np.arange(poly.bounds[0], poly.bounds[2], step)
         for y in np.arange(poly.bounds[1], poly.bounds[3], step)
         if poly.contains(Point(x, y))
     ]
     st.write(f"Total candidate points: {len(candidate_pts)}")
+    st.write(f"Candidate point density: {len(candidate_pts)/area_km2:.2f} points/km²")
 
     # Pin Generation Debugging
+    buck_slope_fail, buck_elev_fail, buck_tpi_fail, buck_wind_fail = 0, 0, 0, 0
+    doe_slope_fail = 0
     buck_candidates, doe_candidates = 0, 0
     buck_pts, doe_pts, scrape_pts, funnels = [], [], [], []
     elev_range = elevation.max() - elevation.min()
-    elev_threshold = (elevation.min() + elev_range * 0.15, elevation.min() + elev_range * 0.85)  # Wider range
-    st.write(f"Elevation threshold for buck beds: {elev_threshold}")
+    elev_threshold = (elevation.min() + elev_range * 0.05, elevation.min() + elev_range * 0.95)
+    st.write(f"Elevation threshold for buck beds: {elev_threshold[0]:.2f} to {elev_threshold[1]:.2f}")
 
     for pt in candidate_pts:
-        row, col = rowcol(transform, pt.x, pt.y)
         try:
+            row, col = rowcol(transform, pt.x, pt.y)
             s, a, pc = slope[row, col], aspect[row, col], patchcut[row, col]
             elev = elevation[row, col]
-            ndvi_val = ndvi[row, col] if ndvi is not None else 0
             tpi_val = tpi[row, col]
         except IndexError:
             continue
@@ -226,47 +238,64 @@ if uploaded_file:
             (wind == "NW" and (270 < a or a < 45))
         )
 
-        # Buck Beds: Slopes, wind-aligned, mid-hill, ridges, moderate NDVI
-        if show_buck_beds and 1 < s < 50 and wind_match and elev_threshold[0] < elev < elev_threshold[1] and tpi_val > 0.2:
-            buck_candidates += 1
-            if ndvi is None or (0.0 < ndvi_val < 0.9):
+        # Buck Beds: Slopes, wind-aligned, mid-hill, ridges
+        if show_buck_beds:
+            if not (0.2 < s < 70):
+                buck_slope_fail += 1
+            elif not (elev_threshold[0] < elev < elev_threshold[1]):
+                buck_elev_fail += 1
+            elif not (tpi_val > 0.05 or np.abs(tpi_val) < 0.01):  # Include flat TPI
+                buck_tpi_fail += 1
+            elif not wind_match:
+                buck_wind_fail += 1
+            else:
+                buck_candidates += 1
                 buck_pts.append(pt)
-        # Doe Beds: Flat areas, high NDVI
-        elif show_doe_beds and s < 10 and (ndvi is None or ndvi_val > 0.5):
-            doe_candidates += 1
-            doe_pts.append(pt)
+
+        # Doe Beds: Flat areas
+        if show_doe_beds:
+            if not (s < 12):
+                doe_slope_fail += 1
+            else:
+                doe_candidates += 1
+                if ndvi is None or ndvi[row, col] > 0.4:
+                    doe_pts.append(pt)
 
     # Scrapes: Near transitions between buck and doe beds
-    for b in buck_pts:
-        for d in doe_pts:
-            if 0.0003 < b.distance(d) < 0.015:  # Wider distance range
-                line = LineString([b, d])
-                mid_pt = line.interpolate(line.length * 0.5)
-                if ndvi is not None:
-                    row, col = rowcol(transform, mid_pt.x, mid_pt.y)
-                    try:
-                        ndvi_val = ndvi[row, col]
-                        if 0.1 < ndvi_val < 0.9:
-                            scrape_pts.append(mid_pt)
-                    except IndexError:
-                        continue
-                else:
-                    scrape_pts.append(mid_pt)
+    if show_scrapes:
+        for b in buck_pts:
+            for d in doe_pts:
+                if 0.0003 < b.distance(d) < 0.015:
+                    line = LineString([b, d])
+                    mid_pt = line.interpolate(line.length * 0.5)
+                    if ndvi is not None:
+                        try:
+                            row, col = rowcol(transform, mid_pt.x, mid_pt.y)
+                            if 0.1 < ndvi[row, col] < 0.9:
+                                scrape_pts.append(mid_pt)
+                        except IndexError:
+                            continue
+                    else:
+                        scrape_pts.append(mid_pt)
 
     # Funnels: Topographic constrictions
-    edge_img = sobel(elevation)
-    funnel_threshold = np.percentile(edge_img, 75)  # Lowered for more funnels
-    funnel_indices = np.argwhere(edge_img > funnel_threshold)
-    for idx in funnel_indices:
-        row, col = idx
-        lon, lat = transform * (col, row)
-        pt = Point(lon, lat)
-        if poly.contains(pt) and (ndvi is None or 0.1 < ndvi[row, col] < 0.9):
-            funnels.append(pt)
+    if show_funnels:
+        edge_img = sobel(elevation)
+        funnel_threshold = np.percentile(edge_img, 70)  # Even lower
+        funnel_indices = np.argwhere(edge_img > funnel_threshold)
+        for idx in funnel_indices:
+            row, col = idx
+            lon, lat = transform * (col, row)
+            pt = Point(lon, lat)
+            if poly.contains(pt):
+                if ndvi is None or (0.1 < ndvi[row, col] < 0.9):
+                    funnels.append(pt)
 
     # Debugging Outputs
-    st.write(f"Buck bed candidates (before NDVI): {buck_candidates}")
-    st.write(f"Doe bed candidates (before NDVI): {doe_candidates}")
+    st.write(f"Buck bed candidates: {buck_candidates}")
+    st.write(f"Buck bed failures - Slope: {buck_slope_fail}, Elevation: {buck_elev_fail}, TPI: {buck_tpi_fail}, Wind: {buck_wind_fail}")
+    st.write(f"Doe bed candidates: {doe_candidates}")
+    st.write(f"Doe bed failures - Slope: {doe_slope_fail}")
     st.write(f"Buck bed points: {len(buck_pts)}")
     st.write(f"Doe bed points: {len(doe_pts)}")
     st.write(f"Scrape points: {len(scrape_pts)}")
@@ -290,8 +319,8 @@ if uploaded_file:
             st.error("Invalid or missing coordinates in pins")
             st.stop()
         st.write(f"Number of pins: {len(pins)}")
-        st.write(f"Lat range: {df.lat.min()} to {df.lat.max()}")
-        st.write(f"Lon range: {df.lon.min()} to {df.lon.max()}")
+        st.write(f"Lat range: {df.lat.min():.6f} to {df.lat.max():.6f}")
+        st.write(f"Lon range: {df.lon.min():.6f} to {df.lon.max():.6f}")
         layers.append(pdk.Layer(
             "ScatterplotLayer",
             data=df,
@@ -302,25 +331,30 @@ if uploaded_file:
         ))
 
     # NDVI Heatmap
-    if show_ndvi_heatmap and ndvi is not None:
+    if show_ndvi_heatmap and ndvi is not None and not np.all(ndvi == 0):
         ndvi_data = [
-            {"lon": transform * (col, row)[0], "lat": transform * (col, row)[1], "weight": max(ndvi[row, col], 0)}
-            for row in range(ndvi.shape[0]) for col in range(ndvi.shape[1]) if not np.isnan(ndvi[row, col])
+            {"lon": transform * (col, row)[0], "lat": transform * (col, row)[1], "weight": max(min(ndvi[row, col], 1.0), 0.0)}
+            for row in range(ndvi.shape[0]) for col in range(ndvi.shape[1]) if not np.isnan(ndvi[row, col]) and ndvi[row, col] != 0
         ]
-        ndvi_df = pd.DataFrame(ndvi_data)
-        layers.append(pdk.Layer(
-            "HeatmapLayer",
-            data=ndvi_df,
-            get_position="[lon, lat]",
-            get_weight="weight",
-            opacity=0.3,
-            radius_pixels=20
-        ))
+        if ndvi_data:
+            ndvi_df = pd.DataFrame(ndvi_data)
+            layers.append(pdk.Layer(
+                "HeatmapLayer",
+                data=ndvi_df,
+                get_position="[lon, lat]",
+                get_weight="weight",
+                opacity=0.3,
+                radius_pixels=20
+            ))
+        else:
+            st.warning("No valid NDVI data for heatmap. Check NDVI source.")
+    elif show_ndvi_heatmap:
+        st.warning("NDVI heatmap disabled: No NDVI data available.")
 
     if layers:
         try:
             st.pydeck_chart(pdk.Deck(
-                map_style="https://tile.opentopomap.org/{z}/{x}/{y}.png",
+                map_style="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 initial_view_state=pdk.ViewState(
                     latitude=np.mean([poly.bounds[1], poly.bounds[3]]),
                     longitude=np.mean([poly.bounds[0], poly.bounds[2]]),
@@ -332,7 +366,7 @@ if uploaded_file:
             st.error(f"Map rendering failed: {e}")
             st.stop()
     else:
-        st.warning("No pins or heatmap generated. Check filters or NDVI data.")
+        st.warning("No pins or heatmap generated. Check filters or terrain data.")
 
     # Export KML
     if st.button("Export KML", key="export_kml"):
