@@ -154,6 +154,9 @@ if uploaded_file:
             st.warning("⚠️ NDVI fetch failed or not available.")
     else:
         st.warning("Sentinel credentials missing. Skipping NDVI fetch.")
+
+    # Placeholder for next step
+    st.write("🔧 Proceed with pin placement and map visualization here...")
 else:
     st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
     st.stop()
