@@ -110,8 +110,13 @@ def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
             data_folder=tempfile.gettempdir()
         )
         data = request.get_data(save_data=True)
-        with open(out_path, "wb") as f:
-            f.write(data[0].read())
+        if isinstance(data[0], np.ndarray):
+            with rasterio.open(out_path, 'w', driver='GTiff', height=data[0].shape[0], width=data[0].shape[1], count=1,
+                               dtype=str(data[0].dtype), crs='EPSG:4326', transform=rasterio.transform.from_bounds(*bounds, data[0].shape[1], data[0].shape[0])) as dst:
+                dst.write(data[0], 1)
+        else:
+            with open(out_path, "wb") as f:
+                f.write(data[0].read())
         return out_path
     except Exception as e:
         st.error(f"NDVI fetch failed: {e}")
@@ -127,7 +132,7 @@ if uploaded_file:
     poly = gdf.geometry.iloc[0]
     st.write(f"Boundary bounds: {poly.bounds}")
     area_km2 = poly.area * 111.32 * 111.32
-    st.write(f"Boundary area: {area_km2:.2f} km²")
+    st.write(f"Boundary area: {area_km2:.2f} km²Boundary area: {area_km2:.2f} km\xb2")
 
     # DEM Fetch
     st.write("Fetching DEM...")
