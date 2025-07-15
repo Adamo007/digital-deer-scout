@@ -309,16 +309,14 @@ def get_human_disturbance_zones(bounds):
     try:
         minx, miny, maxx, maxy = bounds
         
-        # Initialize Overpass API
+        # Method 1: Try Overpass API with simpler query
         api = overpy.Overpass()
         
-        # Query for major roads and buildings
+        # Simplified query for major roads only
         query = f"""
-        [out:json][timeout:25];
+        [out:json][timeout:30];
         (
-          way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential)$"]({miny},{minx},{maxy},{maxx});
-          way["building"]({miny},{minx},{maxy},{maxx});
-          relation["building"]({miny},{minx},{maxy},{maxx});
+          way["highway"~"^(motorway|trunk|primary|secondary)$"]({miny},{minx},{maxy},{maxx});
         );
         out geom;
         """
@@ -327,47 +325,71 @@ def get_human_disturbance_zones(bounds):
         
         disturbance_points = []
         
-        # Process roads
+        # Process roads with simpler approach
         for way in result.ways:
-            if 'highway' in way.tags:
+            if 'highway' in way.tags and len(way.nodes) > 0:
                 highway_type = way.tags['highway']
-                # Different buffer distances based on road type
-                if highway_type in ['motorway', 'trunk']:
-                    buffer_meters = 400  # Major highways
-                elif highway_type in ['primary', 'secondary']:
-                    buffer_meters = 300  # Main roads
-                elif highway_type == 'tertiary':
-                    buffer_meters = 200  # Smaller roads
-                else:
-                    buffer_meters = 150  # Residential roads
                 
-                # Add points along the road
-                for node in way.nodes:
-                    disturbance_points.append({
-                        'lat': float(node.lat),
-                        'lon': float(node.lon),
-                        'type': 'road',
-                        'buffer_meters': buffer_meters
-                    })
+                # Buffer distances based on road type
+                if highway_type in ['motorway', 'trunk']:
+                    buffer_meters = 400
+                elif highway_type in ['primary', 'secondary']:
+                    buffer_meters = 300
+                else:
+                    buffer_meters = 200
+                
+                # Sample every 3rd node to reduce data volume
+                for i, node in enumerate(way.nodes[::3]):
+                    if hasattr(node, 'lat') and hasattr(node, 'lon'):
+                        disturbance_points.append({
+                            'lat': float(node.lat),
+                            'lon': float(node.lon),
+                            'type': 'road',
+                            'buffer_meters': buffer_meters
+                        })
         
-        # Process buildings
-        for way in result.ways:
-            if 'building' in way.tags:
-                # Buildings get 150m buffer
-                for node in way.nodes:
-                    disturbance_points.append({
-                        'lat': float(node.lat),
-                        'lon': float(node.lon),
-                        'type': 'building',
-                        'buffer_meters': 150
-                    })
-        
-        st.write(f"Found {len(disturbance_points)} human disturbance features for avoidance")
-        return disturbance_points
+        if len(disturbance_points) > 0:
+            st.write(f"Found {len(disturbance_points)} road features for avoidance")
+            return disturbance_points
+        else:
+            raise Exception("No road data returned from OSM")
         
     except Exception as e:
-        st.warning(f"Could not fetch road/building data: {e}. Proceeding without human disturbance avoidance.")
-        return []
+        st.warning(f"OpenStreetMap data unavailable: {e}")
+        
+        # Method 2: Fallback - create boundary-based disturbance zones
+        st.info("Using boundary-based road estimation as fallback")
+        return create_boundary_disturbance_zones(bounds)
+
+def create_boundary_disturbance_zones(bounds):
+    """Fallback method: assume roads near property boundaries"""
+    minx, miny, maxx, maxy = bounds
+    
+    # Create disturbance points along property edges (where roads likely are)
+    disturbance_points = []
+    
+    # Points along boundaries with road buffer zones
+    boundary_points = [
+        # North boundary
+        *[(minx + i * (maxx - minx) / 10, maxy, 250) for i in range(11)],
+        # South boundary  
+        *[(minx + i * (maxx - minx) / 10, miny, 250) for i in range(11)],
+        # East boundary
+        *[(maxx, miny + i * (maxy - miny) / 10, 250) for i in range(11)],
+        # West boundary
+        *[(minx, miny + i * (maxy - miny) / 10, 250) for i in range(11)]
+    ]
+    
+    for lon, lat, buffer_m in boundary_points:
+        disturbance_points.append({
+            'lat': lat,
+            'lon': lon,
+            'type': 'boundary_road_estimate',
+            'buffer_meters': buffer_m
+        })
+    
+    st.info(f"Created {len(disturbance_points)} boundary-based disturbance zones")
+    return disturbance_points
 
 def filter_human_disturbance(points, disturbance_zones):
     """Remove points that are too close to roads or buildings"""
