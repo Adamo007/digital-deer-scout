@@ -498,6 +498,36 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
             buck_potential = binary_dilation(fallback_cover, iterations=aggression)
     
     return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
+
+def create_boundary_disturbance_zones(bounds):
+    """Fallback method: assume roads near property boundaries"""
+    minx, miny, maxx, maxy = bounds
+    
+    # Create disturbance points along property edges (where roads likely are)
+    disturbance_points = []
+    
+    # Points along boundaries with road buffer zones
+    boundary_points = [
+        # North boundary
+        *[(minx + i * (maxx - minx) / 10, maxy, 250) for i in range(11)],
+        # South boundary  
+        *[(minx + i * (maxx - minx) / 10, miny, 250) for i in range(11)],
+        # East boundary
+        *[(maxx, miny + i * (maxy - miny) / 10, 250) for i in range(11)],
+        # West boundary
+        *[(minx, miny + i * (maxy - miny) / 10, 250) for i in range(11)]
+    ]
+    
+    for lon, lat, buffer_m in boundary_points:
+        disturbance_points.append({
+            'lat': lat,
+            'lon': lon,
+            'type': 'boundary_road_estimate',
+            'buffer_meters': buffer_m
+        })
+    
+    st.info(f"Created {len(disturbance_points)} boundary-based disturbance zones")
+    return disturbance_points
     """Fallback method: assume roads near property boundaries"""
     minx, miny, maxx, maxy = bounds
     
