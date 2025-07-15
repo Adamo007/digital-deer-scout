@@ -20,7 +20,7 @@ st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
 
 # Sidebar Controls
-st.sidebar.header("🧠 Scouting Parameters")
+st.sidebar.header("🧐 Scouting Parameters")
 wind = st.sidebar.selectbox("Wind Direction", ["NW", "W", "SW", "S", "SE", "E", "NE", "N"])
 phase = st.sidebar.selectbox("Target Phase", ["Early Season", "Pre-Rut", "Rut"])
 aggression = st.sidebar.slider("Pin Aggression Level", 1, 10, 5)
@@ -28,8 +28,6 @@ show_buck_beds = st.sidebar.checkbox("Show Buck Bedding", True)
 show_doe_beds = st.sidebar.checkbox("Show Doe Bedding", True)
 show_scrapes = st.sidebar.checkbox("Show Scrape Locations", True)
 show_funnels = st.sidebar.checkbox("Show Funnels", True)
-show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
-show_ndvi_heatmap = st.sidebar.checkbox("Show NDVI Heatmap", True)
 custom_tiff = st.sidebar.file_uploader("Upload GeoTIFF (DEM)", type=["tif", "tiff"])
 custom_ndvi = st.sidebar.file_uploader("Upload NDVI GeoTIFF (optional)", type=["tif", "tiff"])
 
@@ -132,7 +130,7 @@ if uploaded_file:
     poly = gdf.geometry.iloc[0]
     st.write(f"Boundary bounds: {poly.bounds}")
     area_km2 = poly.area * 111.32 * 111.32
-    st.write(f"Boundary area: {area_km2:.2f} km²Boundary area: {area_km2:.2f} km\xb2")
+    st.write(f"Boundary area: {area_km2:.2f} km²")
 
     # DEM Fetch
     st.write("Fetching DEM...")
@@ -163,8 +161,8 @@ if uploaded_file:
     else:
         st.warning("Sentinel credentials missing. Skipping NDVI fetch.")
 
-    # Placeholder for next step
-    st.write("🔧 Proceed with pin placement and map visualization here...")
+    # TODO: Add back in terrain processing and pin placement logic here.
+    st.write("🔧 Terrain processing and pin placement logic would be executed here...")
 else:
     st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
     st.stop()
