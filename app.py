@@ -32,7 +32,7 @@ show_topo = st.sidebar.checkbox("Show Topographic Overlay", False)
 show_ndvi_heatmap = st.sidebar.checkbox("Show NDVI Heatmap", True)
 custom_tiff = st.sidebar.file_uploader("Upload GeoTIFF (DEM)", type=["tif", "tiff"])
 custom_ndvi = st.sidebar.file_uploader("Upload NDVI GeoTIFF (optional)", type=["tif", "tiff"])
-sentinelhub_token = st.sidebar.text_input("Sentinel Hub API Token (optional, for NDVI fetch)")
+sentinelhub_token = st.sidebar.text_input("Sentinel Hub Access Token (for NDVI fetch)", help="Generate at https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token")
 
 # KML/KMZ Extraction
 def extract_kml(file) -> gpd.GeoDataFrame:
@@ -77,11 +77,12 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
 # NDVI Fetch from Sentinel-2
 def fetch_sentinel_ndvi(bounds, token, out_path="ndvi.tif"):
     if not token:
-        st.warning("No Sentinel Hub token provided. Skipping NDVI fetch.")
+        st.warning("No Sentinel Hub access token provided. Skipping NDVI fetch.")
         return None
     config = SHConfig()
-    config.sh_client_id = token
-    config.sh_client_secret = token
+    config.sh_token = token
+    config.sh_base_url = "https://services.sentinel-hub.com"
+    config.sh_token_url = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
     bbox = BBox(bbox=bounds, crs=CRS.WGS84)
     evalscript = """
         //VERSION=3
@@ -117,13 +118,15 @@ def fetch_sentinel_ndvi(bounds, token, out_path="ndvi.tif"):
 def calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, geometry):
     try:
         with rasterio.open(dem_path) as src:
-            out_image, out_transform = mask(src, [geometry], crop=True)
+            out_image, out_transform = mask(src, [geometry], crop=True, nodata=np.nan)
             elevation = out_image[0].astype(float)
-            if np.all(elevation == 0) or elevation.max() - elevation.min() < 1:
+            if np.all(np.isnan(elevation)) or np.nanmax(elevation) - np.nanmin(elevation) < 1:
                 raise Exception("DEM data appears to be flat or invalid")
-            elevation = gaussian_filter(elevation, sigma=0.75)
-            dx, dy = np.gradient(elevation)
-            slope = np.degrees(np.sqrt(dx**2 + dy**2))
+            elevation = gaussian_filter(elevation, sigma=1.0)
+            pixel_size = src.res[0] * 111320  # Approx meters
+            dx, dy = np.gradient(elevation, pixel_size)
+            slope = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
+            slope = np.clip(slope, 0, 90)
             aspect = np.arctan2(-dx, dy) * 180 / np.pi
             aspect = np.where(aspect < 0, 360 + aspect, aspect)
             patchcut = sobel(elevation) < 0.08
@@ -131,10 +134,10 @@ def calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, geometry):
 
         if ndvi_path:
             with rasterio.open(ndvi_path) as src:
-                out_image, _ = mask(src, [geometry], crop=True)
+                out_image, _ = mask(src, [geometry], crop=True, nodata=np.nan)
                 ndvi = out_image[0].astype(float)
                 ndvi = np.where(np.isnan(ndvi), 0, ndvi)
-                ndvi = gaussian_filter(ndvi, sigma=0.75)
+                ndvi = gaussian_filter(ndvi, sigma=1.0)
                 if np.all(ndvi == 0):
                     st.warning("NDVI data is all zero. Skipping NDVI.")
                     ndvi = None
@@ -152,9 +155,7 @@ if uploaded_file:
     gdf = extract_kml(uploaded_file)
     poly = gdf.geometry.iloc[0]
     st.write(f"Boundary bounds: {poly.bounds}")
-
-    # Calculate area in km² for density check
-    area_km2 = poly.area * 111.32 * 111.32  # Approx km² (1° ≈ 111.32 km)
+    area_km2 = poly.area * 111.32 * 111.32
     st.write(f"Boundary area: {area_km2:.2f} km²")
 
     # Fetch or Load DEM
@@ -189,16 +190,23 @@ if uploaded_file:
 
     # Process Terrain and NDVI
     slope, aspect, transform, patchcut, elevation, ndvi, tpi = calculate_slope_aspect_tpi_ndvi(dem_path, ndvi_path, poly)
-    st.write(f"Elevation range: {elevation.min():.2f} to {elevation.max():.2f}")
-    st.write(f"Aspect range: {aspect.min():.2f} to {aspect.max():.2f}")
-    st.write(f"Slope range: {slope.min():.2f} to {slope.max():.2f}")
+    st.write(f"Elevation range: {np.nanmin(elevation):.2f} to {np.nanmax(elevation):.2f}")
+    st.write(f"Aspect range: {np.nanmin(aspect):.2f} to {np.nanmax(aspect):.2f}")
+    st.write(f"Slope range: {np.nanmin(slope):.2f} to {np.nanmax(slope):.2f}")
     if ndvi is not None:
-        st.write(f"NDVI range: {ndvi.min():.2f} to {ndvi.max():.2f}")
+        st.write(f"NDVI range: {np.nanmin(ndvi):.2f} to {np.nanmax(ndvi):.2f}")
     else:
         st.write("No NDVI data available.")
-    st.write(f"TPI range: {tpi.min():.2f} to {tpi.max():.2f}")
+    st.write(f"TPI range: {np.nanmin(tpi):.2f} to {np.nanmax(tpi):.2f}")
 
-    # Generate Candidate Points with Jitter
+    # Slope Histogram
+    slope_flat = slope.ravel()
+    slope_flat = slope_flat[~np.isnan(slope_flat)]
+    if len(slope_flat) > 0:
+        st.write(f"Slope stats - Mean: {np.mean(slope_flat):.2f}, Median: {np.median(slope_flat):.2f}, "
+                 f"10th %: {np.percentile(slope_flat, 10):.2f}, 90th %: {np.percentile(slope_flat, 90):.2f}")
+
+    # Generate Candidate Points
     step = max((poly.bounds[2] - poly.bounds[0]) / (aggression * 30), 0.00002)
     candidate_pts = [
         Point(x + np.random.uniform(-step, step), y + np.random.uniform(-step, step))
@@ -209,13 +217,13 @@ if uploaded_file:
     st.write(f"Total candidate points: {len(candidate_pts)}")
     st.write(f"Candidate point density: {len(candidate_pts)/area_km2:.2f} points/km²")
 
-    # Pin Generation Debugging
+    # Pin Generation
     buck_slope_fail, buck_elev_fail, buck_tpi_fail, buck_wind_fail = 0, 0, 0, 0
     doe_slope_fail = 0
     buck_candidates, doe_candidates = 0, 0
     buck_pts, doe_pts, scrape_pts, funnels = [], [], [], []
-    elev_range = elevation.max() - elevation.min()
-    elev_threshold = (elevation.min() + elev_range * 0.05, elevation.min() + elev_range * 0.95)
+    elev_range = np.nanmax(elevation) - np.nanmin(elevation)
+    elev_threshold = (np.nanmin(elevation), np.nanmax(elevation))
     st.write(f"Elevation threshold for buck beds: {elev_threshold[0]:.2f} to {elev_threshold[1]:.2f}")
 
     for pt in candidate_pts:
@@ -224,27 +232,29 @@ if uploaded_file:
             s, a, pc = slope[row, col], aspect[row, col], patchcut[row, col]
             elev = elevation[row, col]
             tpi_val = tpi[row, col]
+            if np.isnan(s) or np.isnan(a) or np.isnan(elev) or np.isnan(tpi_val):
+                continue
         except IndexError:
             continue
 
         wind_match = (
-            (wind == "W" and 225 < a < 315) or
-            (wind == "SW" and 180 < a < 270) or
-            (wind == "S" and 135 < a < 225) or
-            (wind == "SE" and 90 < a < 180) or
-            (wind == "E" and 45 < a < 135) or
-            (wind == "NE" and 0 <= a < 90) or
-            (wind == "N" and (315 < a or a < 45)) or
-            (wind == "NW" and (270 < a or a < 45))
+            (wind == "W" and 180 < a < 360) or
+            (wind == "SW" and 135 < a < 315) or
+            (wind == "S" and 90 < a < 270) or
+            (wind == "SE" and 45 < a < 225) or
+            (wind == "E" and 0 < a < 180) or
+            (wind == "NE" and (315 < a or a < 135)) or
+            (wind == "N" and (270 < a or a < 90)) or
+            (wind == "NW" and (225 < a or a < 45))
         )
 
-        # Buck Beds: Slopes, wind-aligned, mid-hill, ridges
+        # Buck Beds
         if show_buck_beds:
-            if not (0.2 < s < 70):
+            if not (0.1 < s < 80):
                 buck_slope_fail += 1
             elif not (elev_threshold[0] < elev < elev_threshold[1]):
                 buck_elev_fail += 1
-            elif not (tpi_val > 0.05 or np.abs(tpi_val) < 0.01):  # Include flat TPI
+            elif not (tpi_val > 0.01 or np.abs(tpi_val) < 0.02):
                 buck_tpi_fail += 1
             elif not wind_match:
                 buck_wind_fail += 1
@@ -252,16 +262,16 @@ if uploaded_file:
                 buck_candidates += 1
                 buck_pts.append(pt)
 
-        # Doe Beds: Flat areas
+        # Doe Beds
         if show_doe_beds:
-            if not (s < 12):
+            if not (s < 15):
                 doe_slope_fail += 1
             else:
                 doe_candidates += 1
                 if ndvi is None or ndvi[row, col] > 0.4:
                     doe_pts.append(pt)
 
-    # Scrapes: Near transitions between buck and doe beds
+    # Scrapes
     if show_scrapes:
         for b in buck_pts:
             for d in doe_pts:
@@ -270,7 +280,7 @@ if uploaded_file:
                     mid_pt = line.interpolate(line.length * 0.5)
                     if ndvi is not None:
                         try:
-                            row, col = rowcol(transform, mid_pt.x, mid_pt.y)
+                            row, col = rowcol(transform, mid_pt.x, pt.y)
                             if 0.1 < ndvi[row, col] < 0.9:
                                 scrape_pts.append(mid_pt)
                         except IndexError:
@@ -278,10 +288,10 @@ if uploaded_file:
                     else:
                         scrape_pts.append(mid_pt)
 
-    # Funnels: Topographic constrictions
+    # Funnels
     if show_funnels:
         edge_img = sobel(elevation)
-        funnel_threshold = np.percentile(edge_img, 70)  # Even lower
+        funnel_threshold = np.percentile(edge_img[~np.isnan(edge_img)], 70)
         funnel_indices = np.argwhere(edge_img > funnel_threshold)
         for idx in funnel_indices:
             row, col = idx
@@ -369,7 +379,7 @@ if uploaded_file:
         st.warning("No pins or heatmap generated. Check filters or terrain data.")
 
     # Export KML
-    if st.button("Export KML", key="export_kml"):
+    if st.button("Export KML"):
         if pins:
             try:
                 gdf_pins = gpd.GeoDataFrame(
