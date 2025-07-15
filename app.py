@@ -120,6 +120,40 @@ if uploaded_file:
     gdf = extract_kml(uploaded_file)
     st.success("✅ KML/KMZ file loaded. Proceeding...")
     st.write(gdf)
+
+    poly = gdf.geometry.iloc[0]
+    st.write(f"Boundary bounds: {poly.bounds}")
+    area_km2 = poly.area * 111.32 * 111.32
+    st.write(f"Boundary area: {area_km2:.2f} km²")
+
+    # DEM Fetch
+    st.write("Fetching DEM...")
+    try:
+        if custom_tiff is not None:
+            tiff_file = tempfile.NamedTemporaryFile(delete=False, suffix=".tif")
+            tiff_file.write(custom_tiff.read())
+            tiff_file.close()
+            dem_path = tiff_file.name
+        else:
+            dem_path = fetch_usgs_lidar(poly.bounds)
+        st.success("✅ DEM successfully fetched.")
+    except Exception as e:
+        st.error(f"DEM fetch failed: {e}")
+        st.stop()
+
+    # NDVI Fetch (use dummy client ID and secret here or input box if preferred)
+    sentinel_client_id = st.secrets.get("SENTINEL_CLIENT_ID", "")
+    sentinel_client_secret = st.secrets.get("SENTINEL_CLIENT_SECRET", "")
+    ndvi_path = None
+    if sentinel_client_id and sentinel_client_secret:
+        st.write("Fetching NDVI...")
+        ndvi_path = fetch_sentinel_ndvi(poly.bounds, sentinel_client_id, sentinel_client_secret)
+        if ndvi_path:
+            st.success("✅ NDVI successfully fetched.")
+        else:
+            st.warning("⚠️ NDVI fetch failed or not available.")
+    else:
+        st.warning("Sentinel credentials missing. Skipping NDVI fetch.")
 else:
     st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
     st.stop()
