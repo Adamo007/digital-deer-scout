@@ -162,6 +162,81 @@ if uploaded_file:
         st.warning("Sentinel credentials missing. Skipping NDVI fetch.")
 
     # TODO: Add back in terrain processing and pin placement logic here.
+# Calculate slope, aspect, TPI
+def calculate_slope_aspect_tpi(dem_path, geometry):
+    with rasterio.open(dem_path) as src:
+        out_image, out_transform = mask(src, [geometry], crop=True, nodata=np.nan)
+        elevation = out_image[0].astype(float)
+        elevation = gaussian_filter(elevation, sigma=2.0)
+        pixel_size = src.res[0] * 111320
+        dx, dy = np.gradient(elevation, pixel_size)
+        slope = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
+        aspect = np.arctan2(-dx, dy) * 180 / np.pi
+        aspect = np.where(aspect < 0, 360 + aspect, aspect)
+        tpi = elevation - gaussian_filter(elevation, sigma=5)
+        return slope, aspect, tpi, elevation, out_transform
+
+# Process terrain
+slope, aspect, tpi, elevation, transform = calculate_slope_aspect_tpi(dem_path, poly)
+st.success("✅ Terrain processed.")
+
+# Generate candidate pins
+step = 0.0002
+x_coords = np.arange(poly.bounds[0], poly.bounds[2], step)
+y_coords = np.arange(poly.bounds[1], poly.bounds[3], step)
+candidate_pts = [Point(x, y) for x in x_coords for y in y_coords if poly.contains(Point(x, y))]
+
+# Classify pins (simple version)
+buck_pts, doe_pts = [], []
+for pt in candidate_pts:
+    try:
+        row, col = rowcol(transform, pt.x, pt.y)
+        s = slope[row, col]
+        a = aspect[row, col]
+        t = tpi[row, col]
+      if show_buck_beds:
+    if not (3 < s < 40):  # moderate slope
+        buck_slope_fail += 1
+    elif aggression < 8 and not (elev_threshold[0] + 0.1 * elev_range < elev < elev_threshold[1] - 0.1 * elev_range):
+        buck_elev_fail += 1
+    elif not (-0.1 < tpi_val < 1.0):  # relaxed topographic prominence
+        buck_tpi_fail += 1
+    elif not wind_match:
+        buck_wind_fail += 1
+    elif ndvi is not None and ndvi[row, col] < 0.05:
+        pass  # skip low vegetation
+    else:
+        buck_candidates += 1
+        buck_pts.append(pt)
+
+    except:
+        continue
+
+# Assemble pins
+pins = []
+pins += [{"lon": pt.x, "lat": pt.y, "type": "Buck Bed", "color": [255, 0, 0]} for pt in buck_pts]
+pins += [{"lon": pt.x, "lat": pt.y, "type": "Doe Bed", "color": [255, 255, 0]} for pt in doe_pts]
+
+if not pins:
+    st.warning("⚠️ No pins were generated. Adjust your parameters or check the DEM.")
+else:
+    df = pd.DataFrame(pins)
+    st.success(f"✅ {len(df)} pins generated.")
+    st.dataframe(df)
+
+    # KML Export
+    if st.button("Export KML"):
+        try:
+            gdf_pins = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".kml")
+            gdf_pins.to_file(tmp.name, driver="KML")
+            with open(tmp.name, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            href = f'<a href="data:application/octet-stream;base64,{b64}" download="scout_output.kml">Download KML</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"KML export failed: {e}")
+
     st.write("🔧 Terrain processing and pin placement logic would be executed here...")
 else:
     st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
