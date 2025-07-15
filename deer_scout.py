@@ -361,7 +361,143 @@ def get_human_disturbance_zones(bounds):
         st.info("Using boundary-based road estimation as fallback")
         return create_boundary_disturbance_zones(bounds)
 
-def create_boundary_disturbance_zones(bounds):
+def find_funnels(terrain_data, aggression):
+    """Find natural funnels using Brad Herndon's terrain features"""
+    elevation = terrain_data['elevation']
+    slope = terrain_data['slope']
+    transform = terrain_data['transform']
+    
+    # Remove invalid data
+    valid_mask = ~np.isnan(elevation) & (elevation > 0)
+    if not np.any(valid_mask):
+        return []
+    
+    valid_elevation = elevation[valid_mask]
+    
+    # Brad Herndon's Key Terrain Features:
+    
+    # 1. SADDLES: Low points along ridgelines
+    elevation_smooth = gaussian_filter(elevation, sigma=3)
+    gy, gx = np.gradient(elevation_smooth)
+    gyy, gyx = np.gradient(gy)
+    gxy, gxx = np.gradient(gx)
+    gaussian_curvature = gxx * gyy - gxy**2
+    
+    # Saddles have negative Gaussian curvature
+    saddles = (gaussian_curvature < -0.0005) & valid_mask
+    
+    # 2. INSIDE CORNERS: L-shaped transitions (terrain breaks)
+    # Find areas where slope direction changes rapidly
+    aspect = np.arctan2(gy, gx) * 180 / np.pi
+    aspect_change = np.abs(np.gradient(aspect)[0]) + np.abs(np.gradient(aspect)[1])
+    inside_corners = (aspect_change > 30) & (slope > 3) & (slope < 15) & valid_mask
+    
+    # 3. POINTS: Ridge ends overlooking valleys
+    from scipy.ndimage import maximum_filter, minimum_filter
+    local_max = maximum_filter(elevation_smooth, size=7) == elevation_smooth
+    high_threshold = np.percentile(valid_elevation, 70)
+    ridge_points = local_max & (elevation > high_threshold) & valid_mask
+    
+    # 4. BENCHES: Flat terraces on slopes
+    # Areas with low slope surrounded by steeper terrain
+    slope_smooth = gaussian_filter(slope, sigma=2)
+    surrounding_slope = maximum_filter(slope_smooth, size=5)
+    benches = (slope_smooth < 8) & (surrounding_slope > 12) & valid_mask
+    
+    # 5. CONVERGING HUBS: Multiple terrain lines meeting
+    # Find areas where multiple drainage or ridge lines converge
+    local_min = minimum_filter(elevation_smooth, size=5) == elevation_smooth
+    drainage_threshold = np.percentile(valid_elevation, 40)
+    drainage_hubs = local_min & (elevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
+    
+    # 6. BREAKLINES: Edges between cover types (using NDVI if available)
+    breaklines = np.zeros_like(elevation, dtype=bool)
+    if terrain_data['ndvi'] is not None:
+        ndvi = terrain_data['ndvi']
+        ndvi_valid = ~np.isnan(ndvi)
+        if np.any(ndvi_valid):
+            # Find edges between different vegetation types
+            ndvi_gradient = np.sqrt(np.gradient(ndvi)[0]**2 + np.gradient(ndvi)[1]**2)
+            breaklines = (ndvi_gradient > 0.1) & ndvi_valid & valid_mask
+    
+    # Combine all Herndon terrain features
+    funnel_areas = saddles | inside_corners | ridge_points | benches | drainage_hubs | breaklines
+    
+    # Apply travel corridor criteria - moderate slopes for deer movement
+    travel_slopes = (slope > 2) & (slope < 18) & valid_mask
+    funnel_areas = funnel_areas & travel_slopes
+    
+    # Apply aggression with conservative dilation
+    if aggression > 7:
+        funnel_areas = binary_dilation(funnel_areas, iterations=min(aggression-7, 2))
+    
+    return extract_points(funnel_areas, transform, max_points=12, min_distance_meters=200)
+
+def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
+    """Find buck bedding areas using Dan Infalt's criteria - thick cover, swamps, near doe bedding"""
+    elevation = terrain_data['elevation']
+    slope = terrain_data['slope']
+    aspect = terrain_data['aspect']
+    transform = terrain_data['transform']
+    
+    # Remove invalid data
+    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
+    if len(valid_elevation) == 0:
+        return []
+    
+    # Dan Infalt Strategy: Focus on thick cover and refuge areas
+    # Make criteria more lenient to ensure we find some buck beds
+    
+    # 1. Thick cover identification (more lenient thresholds)
+    thick_cover = np.ones_like(elevation, dtype=bool)
+    if terrain_data['ndvi'] is not None:
+        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
+        # Lowered threshold for thick vegetation
+        thick_cover = ndvi_valid & (terrain_data['ndvi'] > 0.3)  # Was 0.45
+        
+        # Also include moderate vegetation in various elevations
+        moderate_cover = ndvi_valid & (terrain_data['ndvi'] > 0.25)
+        thick_cover = thick_cover | moderate_cover
+    else:
+        # Without NDVI, use terrain complexity as cover proxy
+        terrain_complexity = np.abs(elevation - gaussian_filter(elevation, sigma=2)) > np.std(valid_elevation) * 0.1
+        thick_cover = terrain_complexity
+    
+    # 2. Natural refuges: More flexible approach
+    # Include various elevation zones, not just low areas
+    from scipy.ndimage import minimum_filter
+    local_lows = minimum_filter(elevation, size=5) == elevation
+    
+    # Include low areas AND protected mid-elevation areas
+    refuge_areas = local_lows | (elevation > np.percentile(valid_elevation, 30)) & \
+                               (elevation < np.percentile(valid_elevation, 80))
+    
+    # 3. Security features - more lenient slopes
+    bedding_slopes = (slope > 0.5) & (slope < 25)  # More lenient
+    
+    # 4. Rut-specific adjustments (more permissive)
+    if phase == "Rut":
+        # During rut: broader search near potential doe areas
+        doe_proximity = (elevation > np.percentile(valid_elevation, 20)) & \
+                       (elevation < np.percentile(valid_elevation, 85))
+        buck_potential = thick_cover & bedding_slopes & (refuge_areas | doe_proximity)
+    else:
+        # Pre-rut and early season: still look for cover but be more flexible
+        buck_potential = thick_cover & bedding_slopes & refuge_areas
+    
+    # Apply more aggressive dilation to ensure we find bedding areas
+    base_iterations = max(2, aggression - 2)  # Start with at least 2 iterations
+    buck_potential = binary_dilation(buck_potential, iterations=base_iterations)
+    
+    # If still no areas found, relax criteria further
+    if not np.any(buck_potential):
+        st.info("Relaxing buck bedding criteria to find suitable areas...")
+        # Very lenient fallback - any area with decent cover
+        fallback_cover = thick_cover & bedding_slopes
+        if np.any(fallback_cover):
+            buck_potential = binary_dilation(fallback_cover, iterations=aggression)
+    
+    return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
     """Fallback method: assume roads near property boundaries"""
     minx, miny, maxx, maxy = bounds
     
