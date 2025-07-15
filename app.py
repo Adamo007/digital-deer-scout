@@ -19,6 +19,8 @@ from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS,
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
 
+st.write("✅ App initialized – waiting for file input.")
+
 # Sidebar Controls
 st.sidebar.header("🧠 Scouting Parameters")
 wind = st.sidebar.selectbox("Wind Direction", ["NW", "W", "SW", "S", "SE", "E", "NE", "N"])
@@ -114,3 +116,9 @@ def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
     except Exception as e:
         st.error(f"NDVI fetch failed: {e}")
         return None
+
+# Guard: Require user to upload file
+uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
+if not uploaded_file:
+    st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
+    st.stop()
