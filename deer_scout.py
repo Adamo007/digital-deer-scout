@@ -181,39 +181,60 @@ def find_buck_bedding(terrain_data, wind_dir, aggression):
     aspect = terrain_data['aspect']
     transform = terrain_data['transform']
     
-    # Buck bedding criteria (Dan Infalt principles)
-    # 1. Elevated positions (top 30% of elevation)
-    elevation_threshold = np.percentile(elevation[elevation > 0], 70)
+    # More aggressive buck bedding criteria
+    # 1. Elevated positions - lower threshold for more candidates
+    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
+    if len(valid_elevation) == 0:
+        return []
+    
+    # Use more lenient elevation threshold (top 50% instead of 30%)
+    elevation_threshold = np.percentile(valid_elevation, 50)
     high_ground = elevation > elevation_threshold
     
-    # 2. Moderate slopes (not too steep, not too flat)
-    good_slope = (slope > 5) & (slope < 25)
+    # 2. Broader slope range
+    good_slope = (slope > 2) & (slope < 35)
     
-    # 3. Thermal cover consideration
-    thermal_cover = np.ones_like(elevation)
+    # 3. Enhanced thermal cover logic
+    thermal_cover = np.ones_like(elevation, dtype=bool)
     if terrain_data['ndvi'] is not None:
-        thermal_cover = terrain_data['ndvi'] > 0.3
+        # More lenient NDVI threshold and handle edge cases
+        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
+        thermal_cover = ndvi_valid & (terrain_data['ndvi'] > 0.2)
+        
+        # If no NDVI coverage, use elevation as proxy for cover
+        if not np.any(thermal_cover):
+            thermal_cover = elevation > np.percentile(valid_elevation, 40)
+    else:
+        # Without NDVI, use elevation variation as thermal cover proxy
+        thermal_cover = elevation > np.percentile(valid_elevation, 40)
     
-    # 4. Wind advantage - avoid direct wind exposure
+    # 4. More flexible wind advantage
     wind_angles = {
         'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
         'S': 180, 'SW': 225, 'W': 270, 'NW': 315
     }
     wind_angle = wind_angles.get(wind_dir, 0)
     
-    # Prefer aspects that allow wind detection
-    wind_advantage = np.abs(aspect - wind_angle) > 45
+    # More lenient wind criteria - allow crosswinds
+    wind_diff = np.abs(aspect - wind_angle)
+    wind_diff = np.minimum(wind_diff, 360 - wind_diff)  # Handle circular nature
+    wind_advantage = wind_diff > 30  # Reduced from 45 degrees
     
-    # Combine criteria
-    buck_potential = high_ground & good_slope & thermal_cover & wind_advantage
+    # Combine criteria with OR logic for more permissive selection
+    buck_potential = high_ground & good_slope & (thermal_cover | wind_advantage)
     
-    # Apply aggression factor
+    # Enhanced aggression scaling
+    base_iterations = max(1, aggression - 3)
     if aggression > 5:
-        buck_potential = binary_dilation(buck_potential, iterations=aggression-5)
-    elif aggression < 5:
-        buck_potential = binary_erosion(buck_potential, iterations=5-aggression)
+        buck_potential = binary_dilation(buck_potential, iterations=base_iterations)
     
-    return extract_points(buck_potential, transform, max_points=20)
+    # Also add ridge detection for buck beds
+    if len(valid_elevation) > 100:
+        ridge_threshold = np.percentile(valid_elevation, 75)
+        ridges = elevation > ridge_threshold
+        buck_potential = buck_potential | (ridges & good_slope)
+    
+    return extract_points(buck_potential, transform, max_points=30)
 
 def find_doe_bedding(terrain_data, wind_dir, aggression):
     """Find doe bedding areas - security cover, thermal protection"""
@@ -222,39 +243,60 @@ def find_doe_bedding(terrain_data, wind_dir, aggression):
     aspect = terrain_data['aspect']
     transform = terrain_data['transform']
     
-    # Doe bedding criteria (Brad Herndon principles)
-    # 1. Security cover - moderate elevation, not exposed
-    mid_elevation = (elevation > np.percentile(elevation[elevation > 0], 20)) & \
-                   (elevation < np.percentile(elevation[elevation > 0], 80))
+    # Enhanced doe bedding criteria
+    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
+    if len(valid_elevation) == 0:
+        return []
+    
+    # 1. Security cover - broader elevation range
+    mid_elevation = (elevation > np.percentile(valid_elevation, 15)) & \
+                   (elevation < np.percentile(valid_elevation, 85))
     
     # 2. Gentle to moderate slopes
-    good_slope = (slope > 2) & (slope < 20)
+    good_slope = (slope > 1) & (slope < 25)
     
-    # 3. Thermal protection
-    thermal_protection = np.ones_like(elevation)
+    # 3. Enhanced thermal protection using NDVI + terrain
+    thermal_protection = np.ones_like(elevation, dtype=bool)
     if terrain_data['ndvi'] is not None:
-        thermal_protection = terrain_data['ndvi'] > 0.4
+        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
+        # Use NDVI to identify dense vegetation
+        dense_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.35)
+        # Also consider moderate vegetation as potential cover
+        moderate_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.25)
+        thermal_protection = dense_vegetation | moderate_vegetation
+        
+        # If no vegetation coverage, use terrain features
+        if not np.any(thermal_protection):
+            thermal_protection = (elevation > np.percentile(valid_elevation, 30)) & \
+                                (elevation < np.percentile(valid_elevation, 70))
+    else:
+        # Without NDVI, use terrain complexity as cover proxy
+        elevation_std = gaussian_filter(elevation, sigma=3)
+        terrain_complexity = np.abs(elevation - elevation_std) > np.std(valid_elevation) * 0.3
+        thermal_protection = terrain_complexity | mid_elevation
     
-    # 4. Protected from wind
+    # 4. Wind protection considerations
     wind_angles = {
         'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
         'S': 180, 'SW': 225, 'W': 270, 'NW': 315
     }
     wind_angle = wind_angles.get(wind_dir, 0)
     
-    # Prefer leeward aspects
-    wind_protection = np.abs(aspect - (wind_angle + 180) % 360) < 90
+    # Prefer leeward aspects but be more flexible
+    leeward_angle = (wind_angle + 180) % 360
+    wind_diff = np.abs(aspect - leeward_angle)
+    wind_diff = np.minimum(wind_diff, 360 - wind_diff)
+    wind_protection = wind_diff < 120  # More lenient than before
     
-    # Combine criteria
-    doe_potential = mid_elevation & good_slope & thermal_protection & wind_protection
+    # Combine criteria with flexible logic
+    doe_potential = mid_elevation & good_slope & (thermal_protection | wind_protection)
     
-    # Apply aggression factor
+    # Enhanced aggression scaling
+    base_iterations = max(1, aggression - 2)
     if aggression > 5:
-        doe_potential = binary_dilation(doe_potential, iterations=aggression-5)
-    elif aggression < 5:
-        doe_potential = binary_erosion(doe_potential, iterations=5-aggression)
+        doe_potential = binary_dilation(doe_potential, iterations=base_iterations)
     
-    return extract_points(doe_potential, transform, max_points=30)
+    return extract_points(doe_potential, transform, max_points=40)
 
 def find_funnels(terrain_data, aggression):
     """Find natural funnels and travel corridors"""
@@ -457,10 +499,17 @@ if uploaded_file:
         if show_buck_beds:
             buck_beds = find_buck_bedding(terrain_data, wind, aggression)
             st.write(f"Found {len(buck_beds)} buck bedding areas")
+            if len(buck_beds) == 0:
+                st.info("No buck beds found. Try increasing aggression level or check if area has sufficient elevation variation.")
         
         if show_doe_beds:
             doe_beds = find_doe_bedding(terrain_data, wind, aggression)
             st.write(f"Found {len(doe_beds)} doe bedding areas")
+            if terrain_data['ndvi'] is None:
+                st.info("NDVI data not available - using terrain-only analysis for vegetation cover estimation.")
+            else:
+                ndvi_coverage = np.sum(~np.isnan(terrain_data['ndvi'])) / terrain_data['ndvi'].size
+                st.write(f"NDVI coverage: {ndvi_coverage:.1%} of area")
         
         if show_funnels:
             funnels = find_funnels(terrain_data, aggression)
