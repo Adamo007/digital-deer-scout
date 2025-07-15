@@ -234,7 +234,7 @@ def find_buck_bedding(terrain_data, wind_dir, aggression):
         ridges = elevation > ridge_threshold
         buck_potential = buck_potential | (ridges & good_slope)
     
-    return extract_points(buck_potential, transform, max_points=30)
+    return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
 
 def find_doe_bedding(terrain_data, wind_dir, aggression):
     """Find doe bedding areas - security cover, thermal protection"""
@@ -296,42 +296,67 @@ def find_doe_bedding(terrain_data, wind_dir, aggression):
     if aggression > 5:
         doe_potential = binary_dilation(doe_potential, iterations=base_iterations)
     
-    return extract_points(doe_potential, transform, max_points=40)
+    return extract_points(doe_potential, transform, max_points=25, min_distance_meters=120)
+
+def filter_points_by_boundary(points, boundary_polygon):
+    """Filter points to only include those within the boundary"""
+    filtered_points = []
+    for lon, lat in points:
+        point = Point(lon, lat)
+        if boundary_polygon.contains(point):
+            filtered_points.append((lon, lat))
+    return filtered_points
 
 def find_funnels(terrain_data, aggression):
-    """Find natural funnels and travel corridors"""
+    """Find natural funnels and travel corridors using improved topographic analysis"""
     elevation = terrain_data['elevation']
     slope = terrain_data['slope']
     transform = terrain_data['transform']
     
-    # Funnels are typically:
-    # 1. Saddles between high points
-    # 2. Gentle slopes between steep areas
-    # 3. Natural corridors
+    # Remove invalid data
+    valid_mask = ~np.isnan(elevation) & (elevation > 0)
+    if not np.any(valid_mask):
+        return []
     
-    # Find saddle points
-    elevation_smooth = gaussian_filter(elevation, sigma=2)
+    # Smooth elevation for better saddle detection
+    elevation_smooth = gaussian_filter(elevation, sigma=3)
     
-    # Calculate curvature to find saddles
+    # Find saddle points using curvature analysis
     gy, gx = np.gradient(elevation_smooth)
     gyy, gyx = np.gradient(gy)
     gxy, gxx = np.gradient(gx)
     
-    # Saddle points have negative curvature in one direction, positive in other
+    # Calculate curvatures
     mean_curvature = (gxx + gyy) / 2
     gaussian_curvature = gxx * gyy - gxy**2
     
     # Saddles have negative Gaussian curvature
-    saddles = gaussian_curvature < -0.001
+    saddles = (gaussian_curvature < -0.0005) & valid_mask
     
-    # Combine with moderate slopes
-    travel_corridors = saddles & (slope > 2) & (slope < 15)
+    # Find low points between high areas (natural passes)
+    # Use morphological operations to find valleys
+    from scipy.ndimage import minimum_filter, maximum_filter
+    local_min = minimum_filter(elevation_smooth, size=5) == elevation_smooth
+    local_max = maximum_filter(elevation_smooth, size=5) == elevation_smooth
     
-    # Apply aggression
-    if aggression > 5:
-        travel_corridors = binary_dilation(travel_corridors, iterations=aggression-5)
+    # Valleys are areas that are local minimums but not global lows
+    valid_elevation = elevation[valid_mask]
+    valley_threshold = np.percentile(valid_elevation, 30)
+    high_threshold = np.percentile(valid_elevation, 70)
     
-    return extract_points(travel_corridors, transform, max_points=15)
+    valleys = local_min & (elevation > valley_threshold) & (elevation < high_threshold)
+    
+    # Gentle slopes for travel corridors
+    travel_slopes = (slope > 1) & (slope < 12) & valid_mask
+    
+    # Combine saddles, valleys, and travel corridors
+    funnel_areas = (saddles | valleys) & travel_slopes
+    
+    # Apply aggression with more conservative dilation
+    if aggression > 6:
+        funnel_areas = binary_dilation(funnel_areas, iterations=min(aggression-6, 3))
+    
+    return extract_points(funnel_areas, transform, max_points=12, min_distance_meters=150)
 
 def find_scrape_locations(terrain_data, phase, aggression):
     """Find potential scrape locations based on hunting phase"""
@@ -356,10 +381,10 @@ def find_scrape_locations(terrain_data, phase, aggression):
     if aggression > 6:
         edge_areas = binary_dilation(edge_areas, iterations=aggression-6)
     
-    return extract_points(edge_areas, transform, max_points=25)
+    return extract_points(edge_areas, transform, max_points=15, min_distance_meters=80)
 
-def extract_points(binary_mask, transform, max_points=20):
-    """Extract coordinate points from binary mask"""
+def extract_points(binary_mask, transform, max_points=20, min_distance_meters=100):
+    """Extract coordinate points from binary mask with distance filtering"""
     if not np.any(binary_mask):
         return []
     
@@ -367,10 +392,10 @@ def extract_points(binary_mask, transform, max_points=20):
     labeled, num_features = label(binary_mask)
     
     points = []
-    for i in range(1, min(num_features + 1, max_points + 1)):
+    for i in range(1, min(num_features + 1, max_points * 3 + 1)):  # Get more candidates first
         # Find centroid of each component
         component = labeled == i
-        if np.sum(component) < 5:  # Skip very small components
+        if np.sum(component) < 3:  # Skip very small components
             continue
             
         y_coords, x_coords = np.where(component)
@@ -381,7 +406,24 @@ def extract_points(binary_mask, transform, max_points=20):
         
         # Convert to geographic coordinates
         lon, lat = rasterio.transform.xy(transform, center_y, center_x)
-        points.append((lon, lat))
+        
+        # Check minimum distance from existing points
+        too_close = False
+        for existing_lon, existing_lat in points:
+            # Calculate distance in meters (approximate)
+            lat_diff = lat - existing_lat
+            lon_diff = lon - existing_lon
+            distance_meters = np.sqrt((lat_diff * 111000)**2 + (lon_diff * 111000 * np.cos(np.radians(lat)))**2)
+            
+            if distance_meters < min_distance_meters:
+                too_close = True
+                break
+        
+        if not too_close:
+            points.append((lon, lat))
+            
+        if len(points) >= max_points:
+            break
     
     return points
 
@@ -497,14 +539,16 @@ if uploaded_file:
         scrapes = []
         
         if show_buck_beds:
-            buck_beds = find_buck_bedding(terrain_data, wind, aggression)
-            st.write(f"Found {len(buck_beds)} buck bedding areas")
+            buck_beds_raw = find_buck_bedding(terrain_data, wind, aggression)
+            buck_beds = filter_points_by_boundary(buck_beds_raw, poly)
+            st.write(f"Found {len(buck_beds)} buck bedding areas (filtered to boundary)")
             if len(buck_beds) == 0:
-                st.info("No buck beds found. Try increasing aggression level or check if area has sufficient elevation variation.")
+                st.info("No buck beds found within boundary. Try increasing aggression level or check if area has sufficient elevation variation.")
         
         if show_doe_beds:
-            doe_beds = find_doe_bedding(terrain_data, wind, aggression)
-            st.write(f"Found {len(doe_beds)} doe bedding areas")
+            doe_beds_raw = find_doe_bedding(terrain_data, wind, aggression)
+            doe_beds = filter_points_by_boundary(doe_beds_raw, poly)
+            st.write(f"Found {len(doe_beds)} doe bedding areas (each represents 3-5 deer family group)")
             if terrain_data['ndvi'] is None:
                 st.info("NDVI data not available - using terrain-only analysis for vegetation cover estimation.")
             else:
@@ -512,11 +556,13 @@ if uploaded_file:
                 st.write(f"NDVI coverage: {ndvi_coverage:.1%} of area")
         
         if show_funnels:
-            funnels = find_funnels(terrain_data, aggression)
-            st.write(f"Found {len(funnels)} funnel locations")
+            funnels_raw = find_funnels(terrain_data, aggression)
+            funnels = filter_points_by_boundary(funnels_raw, poly)
+            st.write(f"Found {len(funnels)} funnel locations (natural travel corridors)")
         
         if show_scrapes:
-            scrapes = find_scrape_locations(terrain_data, phase, aggression)
+            scrapes_raw = find_scrape_locations(terrain_data, phase, aggression)
+            scrapes = filter_points_by_boundary(scrapes_raw, poly)
             st.write(f"Found {len(scrapes)} potential scrape locations")
         
         # Generate KML
