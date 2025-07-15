@@ -1,7 +1,3 @@
-import streamlit as st
-import geopandas as gpd
-import pandas as pd
-from shapely.geometry import Point, LineString
 import tempfile
 import rasterio
 import numpy as np
@@ -20,10 +16,10 @@ from sklearn.cluster import DBSCAN
 import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
-st.title("Digital Deer Scout - Terrain AI")
+st.title("🦌 Digital Deer Scout – Terrain AI")
 
 # Sidebar Controls
-st.sidebar.header("Scouting Parameters")
+st.sidebar.header("🧐 Scouting Parameters")
 wind = st.sidebar.selectbox("Wind Direction", ["NW", "W", "SW", "S", "SE", "E", "NE", "N"])
 phase = st.sidebar.selectbox("Target Phase", ["Early Season", "Pre-Rut", "Rut"])
 aggression = st.sidebar.slider("Pin Aggression Level", 1, 10, 5)
@@ -130,40 +126,20 @@ def analyze_terrain(dem_path, ndvi_path, bounds):
     with rasterio.open(dem_path) as dem:
         elevation = dem.read(1)
         transform = dem.transform
-        dem_shape = elevation.shape
         
     # Calculate slope and aspect
     dy, dx = np.gradient(elevation)
     slope = np.sqrt(dx**2 + dy**2)
     aspect = np.arctan2(dy, dx) * 180 / np.pi
     
-    # Load NDVI if available and resample to match DEM
+    # Load NDVI if available
     ndvi = None
     if ndvi_path and os.path.exists(ndvi_path):
         try:
             with rasterio.open(ndvi_path) as ndvi_src:
-                ndvi_data = ndvi_src.read(1)
-                
-                # If shapes don't match, resample NDVI to match DEM
-                if ndvi_data.shape != dem_shape:
-                    from rasterio.warp import reproject, Resampling
-                    ndvi_resampled = np.empty(dem_shape, dtype=ndvi_data.dtype)
-                    
-                    reproject(
-                        source=ndvi_data,
-                        destination=ndvi_resampled,
-                        src_transform=ndvi_src.transform,
-                        src_crs=ndvi_src.crs,
-                        dst_transform=transform,
-                        dst_crs=dem.crs,
-                        resampling=Resampling.bilinear
-                    )
-                    ndvi = ndvi_resampled
-                else:
-                    ndvi = ndvi_data
-        except Exception as e:
-            st.warning(f"NDVI processing failed: {e}")
-            ndvi = None
+                ndvi = ndvi_src.read(1)
+        except:
+            pass
     
     return {
         'elevation': elevation,
@@ -405,7 +381,7 @@ def generate_kml(buck_beds, doe_beds, funnels, scrapes, wind_dir, phase):
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
 if uploaded_file:
     gdf = extract_kml(uploaded_file)
-    st.success("KML/KMZ file loaded. Proceeding...")
+    st.success("✅ KML/KMZ file loaded. Proceeding...")
     
     poly = gdf.geometry.iloc[0]
     st.write(f"Boundary bounds: {poly.bounds}")
@@ -422,7 +398,7 @@ if uploaded_file:
             dem_path = tiff_file.name
         else:
             dem_path = fetch_usgs_lidar(poly.bounds)
-        st.success("DEM successfully fetched.")
+        st.success("✅ DEM successfully fetched.")
     except Exception as e:
         st.error(f"DEM fetch failed: {e}")
         st.stop()
@@ -435,14 +411,14 @@ if uploaded_file:
         st.write("Fetching NDVI...")
         ndvi_path = fetch_sentinel_ndvi(poly.bounds, sentinel_client_id, sentinel_client_secret)
         if ndvi_path:
-            st.success("NDVI successfully fetched.")
+            st.success("✅ NDVI successfully fetched.")
         else:
-            st.warning("NDVI fetch failed or not available.")
+            st.warning("⚠️ NDVI fetch failed or not available.")
     else:
         st.warning("Sentinel credentials missing. Skipping NDVI fetch.")
 
     # Terrain Analysis and Pin Generation
-    st.write("Analyzing terrain and generating hunting locations...")
+    st.write("🔍 Analyzing terrain and generating hunting locations...")
     
     try:
         # Analyze terrain
@@ -472,21 +448,21 @@ if uploaded_file:
         
         # Generate KML
         if any([buck_beds, doe_beds, funnels, scrapes]):
-            st.write("Generating KML file...")
+            st.write("📍 Generating KML file...")
             kml_content = generate_kml(buck_beds, doe_beds, funnels, scrapes, wind, phase)
             
             # Provide download
             st.download_button(
-                label="Download Hunting Locations KML",
+                label="📥 Download Hunting Locations KML",
                 data=kml_content,
                 file_name=f"deer_scout_{phase.lower().replace(' ', '_')}_wind_{wind.lower()}.kml",
                 mime="application/vnd.google-earth.kml+xml"
             )
             
-            st.success("KML file generated successfully!")
+            st.success("✅ KML file generated successfully!")
             
             # Display summary
-            st.subheader("Location Summary")
+            st.subheader("📊 Location Summary")
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Buck Beds", len(buck_beds))
@@ -504,5 +480,5 @@ if uploaded_file:
         st.write("Debug info:", str(e))
 
 else:
-    st.warning("Waiting for KML/KMZ upload to proceed.")
+    st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
     st.stop()
