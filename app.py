@@ -106,7 +106,8 @@ def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
             responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
             bbox=bbox,
             size=(512, 512),
-            config=config
+            config=config,
+            data_folder=tempfile.gettempdir()
         )
         data = request.get_data(save_data=True)
         with open(out_path, "wb") as f:
@@ -143,7 +144,7 @@ if uploaded_file:
         st.error(f"DEM fetch failed: {e}")
         st.stop()
 
-    # NDVI Fetch (use dummy client ID and secret here or input box if preferred)
+    # NDVI Fetch
     sentinel_client_id = st.secrets.get("SENTINEL_CLIENT_ID", "")
     sentinel_client_secret = st.secrets.get("SENTINEL_CLIENT_SECRET", "")
     ndvi_path = None
