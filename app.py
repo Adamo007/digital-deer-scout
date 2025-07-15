@@ -19,8 +19,6 @@ from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS,
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("🦌 Digital Deer Scout – Terrain AI")
 
-st.write("✅ App initialized – waiting for file input.")
-
 # Sidebar Controls
 st.sidebar.header("🧠 Scouting Parameters")
 wind = st.sidebar.selectbox("Wind Direction", ["NW", "W", "SW", "S", "SE", "E", "NE", "N"])
@@ -76,7 +74,6 @@ def fetch_usgs_lidar(bounds, out_path="dem.tif"):
     raise Exception("USGS DEM download failed")
 
 # NDVI Fetch using auto-refreshed token
-
 def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
     config = SHConfig()
     config.sh_client_id = client_id
@@ -119,6 +116,10 @@ def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
 
 # Guard: Require user to upload file
 uploaded_file = st.file_uploader("Upload KML or KMZ hunt boundary file", type=["kml", "kmz"])
-if not uploaded_file:
+if uploaded_file:
+    gdf = extract_kml(uploaded_file)
+    st.success("✅ KML/KMZ file loaded. Proceeding...")
+    st.write(gdf)
+else:
     st.warning("⏳ Waiting for KML/KMZ upload to proceed.")
     st.stop()
