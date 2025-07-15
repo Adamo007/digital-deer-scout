@@ -108,7 +108,9 @@ def fetch_sentinel_ndvi(bounds, client_id, client_secret, out_path="ndvi.tif"):
             size=(512, 512),
             config=config
         )
-        data = request.get_data(save_data=True, save_path=out_path)
+        data = request.get_data(save_data=True)
+        with open(out_path, "wb") as f:
+            f.write(data[0].read())
         return out_path
     except Exception as e:
         st.error(f"NDVI fetch failed: {e}")
