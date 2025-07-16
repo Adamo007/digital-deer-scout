@@ -9,16 +9,14 @@ import os
 from rasterio.mask import mask
 from zipfile import ZipFile
 import requests
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, label, binary_erosion, binary_dilation, minimum_filter, maximum_filter, binary_opening
 import pydeck as pdk
 from rasterio.transform import rowcol
 from skimage.filters import sobel
 import base64
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
-from scipy.ndimage import label, binary_erosion, binary_dilation, gaussian_filter, minimum_filter, maximum_filter
 from sklearn.cluster import DBSCAN
 import xml.etree.ElementTree as ET
-import overpy
 
 st.set_page_config(page_title="Digital Deer Scout AI", layout="wide")
 st.title("Digital Deer Scout - Terrain AI")
@@ -181,15 +179,11 @@ def identify_clear_cuts(terrain_data):
         return None, None
     
     ndvi = terrain_data['ndvi']
-    elevation = terrain_data['elevation']
     
     # Clear cuts show distinct vegetation patterns
     ndvi_valid = ~np.isnan(ndvi)
     if not np.any(ndvi_valid):
         return None, None
-    
-    # 1. Find circular/geometric patterns (clear cuts are often regular shapes)
-    from scipy.ndimage import label, binary_opening
     
     # Different NDVI ranges indicate different clear cut ages
     # 0-1 years: Very low NDVI (0.1-0.3) - bare ground, slash
@@ -233,271 +227,60 @@ def identify_clear_cuts(terrain_data):
         'mature_cuts': mature_cuts # 6-10 years
     }
     
-    ages = {
-        'new_cuts': 1,
-        'young_cuts': 3.5,
-        'mature_cuts': 8
-    }
-    
-    return clear_cuts, ages
+    return clear_cuts, None
 
-def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
-    """Find buck bedding areas using Dan Infalt's criteria - thick cover, swamps, near doe bedding"""
-    elevation = terrain_data['elevation']
-    slope = terrain_data['slope']
-    aspect = terrain_data['aspect']
-    transform = terrain_data['transform']
-    
-    # Remove invalid data
-    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
-    if len(valid_elevation) == 0:
+def extract_points(binary_mask, transform, max_points=20, min_distance_meters=100):
+    """Extract coordinate points from binary mask with distance filtering"""
+    if not np.any(binary_mask):
         return []
     
-    # Dan Infalt Strategy: Focus on thick cover and refuge areas
+    # Find connected components
+    labeled, num_features = label(binary_mask)
     
-    # 1. Thick cover identification (using NDVI + terrain complexity)
-    thick_cover = np.ones_like(elevation, dtype=bool)
-    if terrain_data['ndvi'] is not None:
-        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
-        # Very thick vegetation (swamps, dense woods)
-        thick_cover = ndvi_valid & (terrain_data['ndvi'] > 0.45)
+    points = []
+    for i in range(1, min(num_features + 1, max_points * 3 + 1)):  # Get more candidates first
+        # Find centroid of each component
+        component = labeled == i
+        if np.sum(component) < 3:  # Skip very small components
+            continue
+            
+        y_coords, x_coords = np.where(component)
         
-        # Also include moderate vegetation in low-lying areas (wet zones)
-        wet_zones = (elevation < np.percentile(valid_elevation, 40)) & \
-                   ndvi_valid & (terrain_data['ndvi'] > 0.35)
-        thick_cover = thick_cover | wet_zones
-    else:
-        # Without NDVI, use low-lying areas and terrain complexity
-        wet_zones = elevation < np.percentile(valid_elevation, 35)
-        terrain_complexity = np.abs(elevation - gaussian_filter(elevation, sigma=2)) > np.std(valid_elevation) * 0.2
-        thick_cover = wet_zones | terrain_complexity
+        # Get centroid
+        center_y = int(np.mean(y_coords))
+        center_x = int(np.mean(x_coords))
+        
+        # Convert to geographic coordinates
+        lon, lat = rasterio.transform.xy(transform, center_y, center_x)
+        
+        # Check minimum distance from existing points
+        too_close = False
+        for existing_lon, existing_lat in points:
+            # Calculate distance in meters (approximate)
+            lat_diff = lat - existing_lat
+            lon_diff = lon - existing_lon
+            distance_meters = np.sqrt((lat_diff * 111000)**2 + (lon_diff * 111000 * np.cos(np.radians(lat)))**2)
+            
+            if distance_meters < min_distance_meters:
+                too_close = True
+                break
+        
+        if not too_close:
+            points.append((lon, lat))
+            
+        if len(points) >= max_points:
+            break
     
-    # 2. Natural refuges: areas surrounded by obstacles
-    # Find areas near drainage or low points (marsh/swamp zones)
-    from scipy.ndimage import minimum_filter
-    local_lows = minimum_filter(elevation, size=7) == elevation
-    drainage_areas = local_lows & (elevation < np.percentile(valid_elevation, 50))
-    
-    # 3. Security features - avoid open areas
-    # Moderate slopes for bedding (not flat, not steep)
-    bedding_slopes = (slope > 1) & (slope < 20)
-    
-    # 4. Rut-specific adjustments
-    if phase == "Rut":
-        # During rut: prioritize areas near potential doe bedding
-        # Mid-elevation areas with good cover
-        doe_proximity = (elevation > np.percentile(valid_elevation, 25)) & \
-                       (elevation < np.percentile(valid_elevation, 75))
-        buck_potential = thick_cover & bedding_slopes & (drainage_areas | doe_proximity)
-    else:
-        # Pre-rut and early season: more isolated thick cover
-        isolated_cover = thick_cover & (elevation < np.percentile(valid_elevation, 60))
-        buck_potential = isolated_cover & bedding_slopes & drainage_areas
-    
-    # 5. Wind consideration (less critical than thick cover per Infalt)
-    wind_angles = {
-        'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
-        'S': 180, 'SW': 225, 'W': 270, 'NW': 315
-    }
-    wind_angle = wind_angles.get(wind_dir, 0)
-    
-    # Apply aggression scaling
-    base_iterations = max(1, aggression - 4)
-    if aggression > 6:
-        buck_potential = binary_dilation(buck_potential, iterations=base_iterations)
-    
-    return extract_points(buck_potential, transform, max_points=15, min_distance_meters=200)
+    return points
 
-def find_doe_bedding(terrain_data, wind_dir, aggression):
-    """Find doe bedding areas - security cover, thermal protection"""
-    elevation = terrain_data['elevation']
-    slope = terrain_data['slope']
-    aspect = terrain_data['aspect']
-    transform = terrain_data['transform']
-    
-    # Enhanced doe bedding criteria
-    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
-    if len(valid_elevation) == 0:
-        return []
-    
-    # 1. Security cover - broader elevation range
-    mid_elevation = (elevation > np.percentile(valid_elevation, 15)) & \
-                   (elevation < np.percentile(valid_elevation, 85))
-    
-    # 2. Gentle to moderate slopes
-    good_slope = (slope > 1) & (slope < 25)
-    
-    # 3. Enhanced thermal protection using NDVI + terrain
-    thermal_protection = np.ones_like(elevation, dtype=bool)
-    if terrain_data['ndvi'] is not None:
-        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
-        # Use NDVI to identify dense vegetation
-        dense_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.35)
-        # Also consider moderate vegetation as potential cover
-        moderate_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.25)
-        thermal_protection = dense_vegetation | moderate_vegetation
-        
-        # If no vegetation coverage, use terrain features
-        if not np.any(thermal_protection):
-            thermal_protection = (elevation > np.percentile(valid_elevation, 30)) & \
-                                (elevation < np.percentile(valid_elevation, 70))
-    else:
-        # Without NDVI, use terrain complexity as cover proxy
-        elevation_std = gaussian_filter(elevation, sigma=3)
-        terrain_complexity = np.abs(elevation - elevation_std) > np.std(valid_elevation) * 0.3
-        thermal_protection = terrain_complexity | mid_elevation
-    
-    # 4. Wind protection considerations
-    wind_angles = {
-        'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
-        'S': 180, 'SW': 225, 'W': 270, 'NW': 315
-    }
-    wind_angle = wind_angles.get(wind_dir, 0)
-    
-    # Prefer leeward aspects but be more flexible
-    leeward_angle = (wind_angle + 180) % 360
-    wind_diff = np.abs(aspect - leeward_angle)
-    wind_diff = np.minimum(wind_diff, 360 - wind_diff)
-    wind_protection = wind_diff < 120  # More lenient than before
-    
-    # Combine criteria with flexible logic
-    doe_potential = mid_elevation & good_slope & (thermal_protection | wind_protection)
-    
-    # Enhanced aggression scaling
-    base_iterations = max(1, aggression - 2)
-    if aggression > 5:
-        doe_potential = binary_dilation(doe_potential, iterations=base_iterations)
-    
-    return extract_points(doe_potential, transform, max_points=25, min_distance_meters=120)
-
-def get_human_disturbance_zones(bounds):
-    """Fetch roads and buildings from OpenStreetMap to create avoidance zones"""
-    try:
-        minx, miny, maxx, maxy = bounds
-        
-        # Method 1: Try Overpass API with simpler query
-        api = overpy.Overpass()
-        
-        # Simplified query for major roads only
-        query = f"""
-        [out:json][timeout:30];
-        (
-          way["highway"~"^(motorway|trunk|primary|secondary)$"]({miny},{minx},{maxy},{maxx});
-        );
-        out geom;
-        """
-        
-        result = api.query(query)
-        
-        disturbance_points = []
-        
-        # Process roads with simpler approach
-        for way in result.ways:
-            if 'highway' in way.tags and len(way.nodes) > 0:
-                highway_type = way.tags['highway']
-                
-                # Buffer distances based on road type
-                if highway_type in ['motorway', 'trunk']:
-                    buffer_meters = 400
-                elif highway_type in ['primary', 'secondary']:
-                    buffer_meters = 300
-                else:
-                    buffer_meters = 200
-                
-                # Sample every 3rd node to reduce data volume
-                for i, node in enumerate(way.nodes[::3]):
-                    if hasattr(node, 'lat') and hasattr(node, 'lon'):
-                        disturbance_points.append({
-                            'lat': float(node.lat),
-                            'lon': float(node.lon),
-                            'type': 'road',
-                            'buffer_meters': buffer_meters
-                        })
-        
-        if len(disturbance_points) > 0:
-            st.write(f"Found {len(disturbance_points)} road features for avoidance")
-            return disturbance_points
-        else:
-            raise Exception("No road data returned from OSM")
-        
-    except Exception as e:
-        st.warning(f"OpenStreetMap data unavailable: {e}")
-        
-        # Method 2: Fallback - create boundary-based disturbance zones
-        st.info("Using boundary-based road estimation as fallback")
-        return create_boundary_disturbance_zones(bounds)
-
-def find_funnels(terrain_data, aggression):
-    """Find natural funnels using Brad Herndon's terrain features"""
-    elevation = terrain_data['elevation']
-    slope = terrain_data['slope']
-    transform = terrain_data['transform']
-    
-    # Remove invalid data
-    valid_mask = ~np.isnan(elevation) & (elevation > 0)
-    if not np.any(valid_mask):
-        return []
-    
-    valid_elevation = elevation[valid_mask]
-    
-    # Brad Herndon's Key Terrain Features:
-    
-    # 1. SADDLES: Low points along ridgelines
-    elevation_smooth = gaussian_filter(elevation, sigma=3)
-    gy, gx = np.gradient(elevation_smooth)
-    gyy, gyx = np.gradient(gy)
-    gxy, gxx = np.gradient(gx)
-    gaussian_curvature = gxx * gyy - gxy**2
-    
-    # Saddles have negative Gaussian curvature
-    saddles = (gaussian_curvature < -0.0005) & valid_mask
-    
-    # 2. INSIDE CORNERS: L-shaped transitions (terrain breaks)
-    # Find areas where slope direction changes rapidly
-    aspect = np.arctan2(gy, gx) * 180 / np.pi
-    aspect_change = np.abs(np.gradient(aspect)[0]) + np.abs(np.gradient(aspect)[1])
-    inside_corners = (aspect_change > 30) & (slope > 3) & (slope < 15) & valid_mask
-    
-    # 3. POINTS: Ridge ends overlooking valleys
-    from scipy.ndimage import maximum_filter, minimum_filter
-    local_max = maximum_filter(elevation_smooth, size=7) == elevation_smooth
-    high_threshold = np.percentile(valid_elevation, 70)
-    ridge_points = local_max & (elevation > high_threshold) & valid_mask
-    
-    # 4. BENCHES: Flat terraces on slopes
-    # Areas with low slope surrounded by steeper terrain
-    slope_smooth = gaussian_filter(slope, sigma=2)
-    surrounding_slope = maximum_filter(slope_smooth, size=5)
-    benches = (slope_smooth < 8) & (surrounding_slope > 12) & valid_mask
-    
-    # 5. CONVERGING HUBS: Multiple terrain lines meeting
-    # Find areas where multiple drainage or ridge lines converge
-    local_min = minimum_filter(elevation_smooth, size=5) == elevation_smooth
-    drainage_threshold = np.percentile(valid_elevation, 40)
-    drainage_hubs = local_min & (elevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
-    
-    # 6. BREAKLINES: Edges between cover types (using NDVI if available)
-    breaklines = np.zeros_like(elevation, dtype=bool)
-    if terrain_data['ndvi'] is not None:
-        ndvi = terrain_data['ndvi']
-        ndvi_valid = ~np.isnan(ndvi)
-        if np.any(ndvi_valid):
-            # Find edges between different vegetation types
-            ndvi_gradient = np.sqrt(np.gradient(ndvi)[0]**2 + np.gradient(ndvi)[1]**2)
-            breaklines = (ndvi_gradient > 0.1) & ndvi_valid & valid_mask
-    
-    # Combine all Herndon terrain features
-    funnel_areas = saddles | inside_corners | ridge_points | benches | drainage_hubs | breaklines
-    
-    # Apply travel corridor criteria - moderate slopes for deer movement
-    travel_slopes = (slope > 2) & (slope < 18) & valid_mask
-    funnel_areas = funnel_areas & travel_slopes
-    
-    # Apply aggression with conservative dilation
-    if aggression > 7:
-        funnel_areas = binary_dilation(funnel_areas, iterations=min(aggression-7, 2))
-    
-    return extract_points(funnel_areas, transform, max_points=12, min_distance_meters=200)
+def filter_points_by_boundary(points, boundary_polygon):
+    """Filter points to only include those within the boundary"""
+    filtered_points = []
+    for lon, lat in points:
+        point = Point(lon, lat)
+        if boundary_polygon.contains(point):
+            filtered_points.append((lon, lat))
+    return filtered_points
 
 def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
     """Find buck bedding areas using Dan Infalt's strategies + clear cut edge tactics"""
@@ -512,9 +295,9 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
         return []
     
     # Identify clear cuts for buck edge strategy
-    clear_cuts, cut_ages = identify_clear_cuts(terrain_data)
+    clear_cuts, _ = identify_clear_cuts(terrain_data)
     
-    # Dan Infalt's MARSH/TRANSITION strategies (existing logic)
+    # Dan Infalt's MARSH/TRANSITION strategies
     transition_zones = np.ones_like(elevation, dtype=bool)
     if terrain_data['ndvi'] is not None:
         ndvi_valid = ~np.isnan(terrain_data['ndvi'])
@@ -526,8 +309,7 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
         elev_gradient = np.sqrt(np.gradient(elevation)[0]**2 + np.gradient(elevation)[1]**2)
         transition_zones = elev_gradient > np.std(valid_elevation) * 0.3
     
-    # Points, fingers, bowls, islands (existing logic)
-    from scipy.ndimage import minimum_filter, maximum_filter
+    # Points, fingers, bowls, islands
     local_max = maximum_filter(elevation, size=7) == elevation
     high_threshold = np.percentile(valid_elevation, 60)
     points_fingers = local_max & (elevation > high_threshold)
@@ -549,7 +331,6 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
         
         if np.any(all_cuts):
             # Create edge zones using dilation then subtraction
-            from scipy.ndimage import binary_dilation
             cut_edges = binary_dilation(all_cuts, iterations=2) & ~all_cuts
             
             # DOWNWIND EDGES based on wind direction
@@ -612,102 +393,91 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
     
     return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
 
-def create_boundary_disturbance_zones(bounds):
-    """Fallback method: assume roads near property boundaries"""
-    minx, miny, maxx, maxy = bounds
+def find_doe_bedding(terrain_data, wind_dir, aggression):
+    """Find doe bedding areas including clear cut interior strategy"""
+    elevation = terrain_data['elevation']
+    slope = terrain_data['slope']
+    aspect = terrain_data['aspect']
+    transform = terrain_data['transform']
     
-    # Create disturbance points along property edges (where roads likely are)
-    disturbance_points = []
+    # Remove invalid data
+    valid_elevation = elevation[~np.isnan(elevation) & (elevation > 0)]
+    if len(valid_elevation) == 0:
+        return []
     
-    # Points along boundaries with road buffer zones
-    boundary_points = [
-        # North boundary
-        *[(minx + i * (maxx - minx) / 10, maxy, 250) for i in range(11)],
-        # South boundary  
-        *[(minx + i * (maxx - minx) / 10, miny, 250) for i in range(11)],
-        # East boundary
-        *[(maxx, miny + i * (maxy - miny) / 10, 250) for i in range(11)],
-        # West boundary
-        *[(minx, miny + i * (maxy - miny) / 10, 250) for i in range(11)]
-    ]
+    # Identify clear cuts for doe bedding analysis
+    clear_cuts, _ = identify_clear_cuts(terrain_data)
     
-    for lon, lat, buffer_m in boundary_points:
-        disturbance_points.append({
-            'lat': lat,
-            'lon': lon,
-            'type': 'boundary_road_estimate',
-            'buffer_meters': buffer_m
-        })
+    # Traditional doe bedding
+    mid_elevation = (elevation > np.percentile(valid_elevation, 15)) & \
+                   (elevation < np.percentile(valid_elevation, 85))
     
-    st.info(f"Created {len(disturbance_points)} boundary-based disturbance zones")
-    return disturbance_points
-    """Fallback method: assume roads near property boundaries"""
-    minx, miny, maxx, maxy = bounds
+    good_slope = (slope > 1) & (slope < 25)
     
-    # Create disturbance points along property edges (where roads likely are)
-    disturbance_points = []
-    
-    # Points along boundaries with road buffer zones
-    boundary_points = [
-        # North boundary
-        *[(minx + i * (maxx - minx) / 10, maxy, 250) for i in range(11)],
-        # South boundary  
-        *[(minx + i * (maxx - minx) / 10, miny, 250) for i in range(11)],
-        # East boundary
-        *[(maxx, miny + i * (maxy - miny) / 10, 250) for i in range(11)],
-        # West boundary
-        *[(minx, miny + i * (maxy - miny) / 10, 250) for i in range(11)]
-    ]
-    
-    for lon, lat, buffer_m in boundary_points:
-        disturbance_points.append({
-            'lat': lat,
-            'lon': lon,
-            'type': 'boundary_road_estimate',
-            'buffer_meters': buffer_m
-        })
-    
-    st.info(f"Created {len(disturbance_points)} boundary-based disturbance zones")
-    return disturbance_points
-
-def filter_human_disturbance(points, disturbance_zones):
-    """Remove points that are too close to roads or buildings"""
-    if not disturbance_zones:
-        return points
-    
-    filtered_points = []
-    removed_count = 0
-    
-    for lon, lat in points:
-        too_close = False
+    # Enhanced thermal protection using NDVI + terrain
+    thermal_protection = np.ones_like(elevation, dtype=bool)
+    if terrain_data['ndvi'] is not None:
+        ndvi_valid = ~np.isnan(terrain_data['ndvi'])
+        dense_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.35)
+        moderate_vegetation = ndvi_valid & (terrain_data['ndvi'] > 0.25)
+        thermal_protection = dense_vegetation | moderate_vegetation
         
-        for zone in disturbance_zones:
-            # Calculate distance in meters
-            lat_diff = lat - zone['lat']
-            lon_diff = lon - zone['lon']
-            distance_meters = np.sqrt((lat_diff * 111000)**2 + (lon_diff * 111000 * np.cos(np.radians(lat)))**2)
+        if not np.any(thermal_protection):
+            thermal_protection = (elevation > np.percentile(valid_elevation, 30)) & \
+                                (elevation < np.percentile(valid_elevation, 70))
+    else:
+        elevation_std = gaussian_filter(elevation, sigma=3)
+        terrain_complexity = np.abs(elevation - elevation_std) > np.std(valid_elevation) * 0.3
+        thermal_protection = terrain_complexity | mid_elevation
+    
+    # Wind protection
+    wind_angles = {
+        'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
+        'S': 180, 'SW': 225, 'W': 270, 'NW': 315
+    }
+    wind_angle = wind_angles.get(wind_dir, 0)
+    leeward_angle = (wind_angle + 180) % 360
+    wind_diff = np.abs(aspect - leeward_angle)
+    wind_diff = np.minimum(wind_diff, 360 - wind_diff)
+    wind_protection = wind_diff < 120
+    
+    # Traditional doe bedding
+    traditional_doe_bedding = mid_elevation & good_slope & (thermal_protection | wind_protection)
+    
+    # CLEAR CUT DOE BEDDING STRATEGY
+    clear_cut_bedding = np.zeros_like(elevation, dtype=bool)
+    
+    if clear_cuts is not None:
+        # Does prefer INTERIOR of clear cuts when growth is thick (2-6 years)
+        young_cut_interior = clear_cuts['young_cuts']  # 2-5 years old
+        
+        # Create interior zones by eroding edges
+        if np.any(young_cut_interior):
+            # Erode to get interior areas
+            interior_zones = binary_erosion(young_cut_interior, iterations=3)
             
-            if distance_meters < zone['buffer_meters']:
-                too_close = True
-                removed_count += 1
-                break
+            # Does establish bedding hubs in these areas
+            # Look for gentle slopes within the interior
+            interior_bedding_slopes = (slope > 0.5) & (slope < 15)
+            clear_cut_bedding = interior_zones & interior_bedding_slopes
+            
+            st.info(f"Found clear cuts (2-5 years old) - analyzing interior for doe bedding hubs")
         
-        if not too_close:
-            filtered_points.append((lon, lat))
+        # Also check mature cuts (6-10 years) for some doe use
+        mature_cut_bedding = clear_cuts['mature_cuts'] & good_slope
+        clear_cut_bedding = clear_cut_bedding | mature_cut_bedding
     
-    if removed_count > 0:
-        st.info(f"Removed {removed_count} pins that were too close to roads/buildings")
+    # Combine traditional and clear cut bedding
+    doe_potential = traditional_doe_bedding | clear_cut_bedding
     
-    return filtered_points
+    # Enhanced aggression scaling
+    base_iterations = max(1, aggression - 2)
+    if aggression > 5:
+        doe_potential = binary_dilation(doe_potential, iterations=base_iterations)
+    
+    return extract_points(doe_potential, transform, max_points=30, min_distance_meters=100)
 
-def filter_points_by_boundary(points, boundary_polygon):
-    """Filter points to only include those within the boundary"""
-    filtered_points = []
-    for lon, lat in points:
-        point = Point(lon, lat)
-        if boundary_polygon.contains(point):
-            filtered_points.append((lon, lat))
-    return filtered_points
+def find_funnels(terrain_data, aggression):
     """Find natural funnels using Brad Herndon's terrain features"""
     elevation = terrain_data['elevation']
     slope = terrain_data['slope']
@@ -739,7 +509,6 @@ def filter_points_by_boundary(points, boundary_polygon):
     inside_corners = (aspect_change > 30) & (slope > 3) & (slope < 15) & valid_mask
     
     # 3. POINTS: Ridge ends overlooking valleys
-    from scipy.ndimage import maximum_filter, minimum_filter
     local_max = maximum_filter(elevation_smooth, size=7) == elevation_smooth
     high_threshold = np.percentile(valid_elevation, 70)
     ridge_points = local_max & (elevation > high_threshold) & valid_mask
@@ -804,50 +573,6 @@ def find_scrape_locations(terrain_data, phase, aggression):
     
     return extract_points(edge_areas, transform, max_points=15, min_distance_meters=80)
 
-def extract_points(binary_mask, transform, max_points=20, min_distance_meters=100):
-    """Extract coordinate points from binary mask with distance filtering"""
-    if not np.any(binary_mask):
-        return []
-    
-    # Find connected components
-    labeled, num_features = label(binary_mask)
-    
-    points = []
-    for i in range(1, min(num_features + 1, max_points * 3 + 1)):  # Get more candidates first
-        # Find centroid of each component
-        component = labeled == i
-        if np.sum(component) < 3:  # Skip very small components
-            continue
-            
-        y_coords, x_coords = np.where(component)
-        
-        # Get centroid
-        center_y = int(np.mean(y_coords))
-        center_x = int(np.mean(x_coords))
-        
-        # Convert to geographic coordinates
-        lon, lat = rasterio.transform.xy(transform, center_y, center_x)
-        
-        # Check minimum distance from existing points
-        too_close = False
-        for existing_lon, existing_lat in points:
-            # Calculate distance in meters (approximate)
-            lat_diff = lat - existing_lat
-            lon_diff = lon - existing_lon
-            distance_meters = np.sqrt((lat_diff * 111000)**2 + (lon_diff * 111000 * np.cos(np.radians(lat)))**2)
-            
-            if distance_meters < min_distance_meters:
-                too_close = True
-                break
-        
-        if not too_close:
-            points.append((lon, lat))
-            
-        if len(points) >= max_points:
-            break
-    
-    return points
-
 def generate_kml(buck_beds, doe_beds, funnels, scrapes, wind_dir, phase):
     """Generate KML file with hunting locations"""
     
@@ -895,9 +620,9 @@ def generate_kml(buck_beds, doe_beds, funnels, scrapes, wind_dir, phase):
             coordinates.text = f"{lon},{lat},0"
     
     # Add all hunting locations
-    add_placemark(buck_beds, "Buck Bed", "buck_bed", "Elevated bedding area with good visibility")
-    add_placemark(doe_beds, "Doe Bed", "doe_bed", "Security cover bedding area")
-    add_placemark(funnels, "Funnel", "funnel", "Natural travel corridor")
+    add_placemark(buck_beds, "Buck Bed", "buck_bed", "Mature buck bedding: transition tips + clear cut edges")
+    add_placemark(doe_beds, "Doe Bed", "doe_bed", "Family group bedding: security cover + clear cut interiors")
+    add_placemark(funnels, "Funnel", "funnel", "Natural travel corridor: saddles, inside corners, points, benches")
     add_placemark(scrapes, "Scrape", "scrape", f"Potential scrape location - {phase}")
     
     # Convert to string
@@ -949,10 +674,6 @@ if uploaded_file:
     # Terrain Analysis and Pin Generation
     st.write("Analyzing terrain and generating hunting locations...")
     
-    # Get human disturbance zones for avoidance
-    st.write("Fetching roads and buildings for avoidance zones...")
-    disturbance_zones = get_human_disturbance_zones(poly.bounds)
-    
     try:
         # Analyze terrain
         terrain_data = analyze_terrain(dem_path, ndvi_path, poly.bounds)
@@ -963,36 +684,32 @@ if uploaded_file:
         funnels = []
         scrapes = []
         
-        if show_buck_beds:
-            buck_beds_raw = find_buck_bedding(terrain_data, wind, aggression, phase)
-            buck_beds_boundary = filter_points_by_boundary(buck_beds_raw, poly)
-            buck_beds = filter_human_disturbance(buck_beds_boundary, disturbance_zones)
-            st.write(f"Found {len(buck_beds)} buck bedding areas (Infalt strategy: marsh transitions, points/fingers/bowls/islands)")
-            if len(buck_beds) == 0:
-                st.info("No mature buck beds found. Infalt focuses on 'tips of points/fingers in transition to marsh' - look for timber/cattail breaks.")
-        
         if show_doe_beds:
             doe_beds_raw = find_doe_bedding(terrain_data, wind, aggression)
-            doe_beds_boundary = filter_points_by_boundary(doe_beds_raw, poly)
-            doe_beds = filter_human_disturbance(doe_beds_boundary, disturbance_zones)
-            st.write(f"Found {len(doe_beds)} doe family bedding areas (3-5 deer groups, security cover away from disturbance)")
+            doe_beds = filter_points_by_boundary(doe_beds_raw, poly)
+            st.write(f"Found {len(doe_beds)} doe family bedding areas (traditional + clear cut interior strategy)")
             if terrain_data['ndvi'] is None:
                 st.info("NDVI data not available - using terrain-only analysis for vegetation cover estimation.")
             else:
                 ndvi_coverage = np.sum(~np.isnan(terrain_data['ndvi'])) / terrain_data['ndvi'].size
                 st.write(f"NDVI vegetation coverage: {ndvi_coverage:.1%} of area")
         
+        if show_buck_beds:
+            buck_beds_raw = find_buck_bedding(terrain_data, wind, aggression, phase)
+            buck_beds = filter_points_by_boundary(buck_beds_raw, poly)
+            st.write(f"Found {len(buck_beds)} buck bedding areas (Infalt marsh transitions + clear cut downwind edges)")
+            if len(buck_beds) == 0:
+                st.info("No mature buck beds found. Try: 1) Infalt's 'tips of points/fingers in transition to marsh', 2) Downwind edges of clear cuts")
+        
         if show_funnels:
             funnels_raw = find_funnels(terrain_data, aggression)
-            funnels_boundary = filter_points_by_boundary(funnels_raw, poly)
-            funnels = filter_human_disturbance(funnels_boundary, disturbance_zones)
-            st.write(f"Found {len(funnels)} terrain funnels (Herndon method: saddles, inside corners, points, benches - avoiding roads)")
+            funnels = filter_points_by_boundary(funnels_raw, poly)
+            st.write(f"Found {len(funnels)} terrain funnels (Herndon method: saddles, inside corners, points, benches)")
         
         if show_scrapes:
             scrapes_raw = find_scrape_locations(terrain_data, phase, aggression)
-            scrapes_boundary = filter_points_by_boundary(scrapes_raw, poly)
-            scrapes = filter_human_disturbance(scrapes_boundary, disturbance_zones)
-            st.write(f"Found {len(scrapes)} potential scrape locations ({phase} pattern, away from human activity)")
+            scrapes = filter_points_by_boundary(scrapes_raw, poly)
+            st.write(f"Found {len(scrapes)} potential scrape locations ({phase} pattern)")
         
         # Generate KML
         if any([buck_beds, doe_beds, funnels, scrapes]):
