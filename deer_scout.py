@@ -434,7 +434,7 @@ def find_funnels(terrain_data, aggression):
     return extract_points(funnel_areas, transform, max_points=12, min_distance_meters=200)
 
 def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
-    """Find buck bedding areas using Dan Infalt's specific strategies from The Hunting Beast forum"""
+    """Find buck bedding areas using Dan Infalt's strategies + clear cut edge tactics"""
     elevation = terrain_data['elevation']
     slope = terrain_data['slope']
     aspect = terrain_data['aspect']
@@ -445,97 +445,106 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
     if len(valid_elevation) == 0:
         return []
     
-    # Dan Infalt's KEY STRATEGIES from forum discussions:
+    # Identify clear cuts for buck edge strategy
+    clear_cuts, cut_ages = identify_clear_cuts(terrain_data)
     
-    # 1. MARSH/SWAMP TRANSITION ZONES (his primary focus)
-    # "When scouting a marsh focus on the transition, the break between the timber and the cattails"
+    # Dan Infalt's MARSH/TRANSITION strategies (existing logic)
     transition_zones = np.ones_like(elevation, dtype=bool)
     if terrain_data['ndvi'] is not None:
         ndvi_valid = ~np.isnan(terrain_data['ndvi'])
-        # Find vegetation edges (transition between timber and cattails/marsh)
         ndvi_gradient = np.sqrt(np.gradient(terrain_data['ndvi'])[0]**2 + np.gradient(terrain_data['ndvi'])[1]**2)
         transition_zones = (ndvi_gradient > 0.08) & ndvi_valid
-        
-        # Also thick cover areas (cattails, thick timber)
         thick_cover = ndvi_valid & (terrain_data['ndvi'] > 0.4)
         transition_zones = transition_zones | thick_cover
     else:
-        # Without NDVI, use elevation changes as transition proxy
         elev_gradient = np.sqrt(np.gradient(elevation)[0]**2 + np.gradient(elevation)[1]**2)
         transition_zones = elev_gradient > np.std(valid_elevation) * 0.3
     
-    # 2. POINTS, FINGERS, BOWLS, AND ISLANDS
-    # "Look for points, fingers, bowls, and islands along the transition"
-    # "Bedding is typically located on the tips of these in transition to the marsh"
-    
+    # Points, fingers, bowls, islands (existing logic)
     from scipy.ndimage import minimum_filter, maximum_filter
-    
-    # POINTS & FINGERS: Local high spots that jut out
     local_max = maximum_filter(elevation, size=7) == elevation
-    high_threshold = np.percentile(valid_elevation, 60)  # More lenient than 70%
+    high_threshold = np.percentile(valid_elevation, 60)
     points_fingers = local_max & (elevation > high_threshold)
     
-    # BOWLS: Local depressions that provide security
     local_min = minimum_filter(elevation, size=5) == elevation
     mid_threshold = np.percentile(valid_elevation, 40)
     bowls = local_min & (elevation > mid_threshold)
     
-    # ISLANDS: Isolated higher areas within low terrain
-    # Areas higher than immediate surroundings but not highest overall
     surrounding_avg = gaussian_filter(elevation, sigma=3)
     islands = (elevation > surrounding_avg + np.std(valid_elevation) * 0.2) & \
               (elevation < np.percentile(valid_elevation, 75))
     
-    # 3. ACCESS TRAILS TO BEDDING
-    # "Study access trails from the marsh to the transition or from the marsh to a remote island"
-    # "There is likely bedding at the end of those access trails"
+    # CLEAR CUT BUCK BEDDING STRATEGY
+    clear_cut_buck_bedding = np.zeros_like(elevation, dtype=bool)
     
-    # Moderate slopes that could be travel routes TO bedding
+    if clear_cuts is not None:
+        # Bucks use EDGES and DOWNWIND SIDES of clear cuts
+        all_cuts = clear_cuts['young_cuts'] | clear_cuts['mature_cuts']
+        
+        if np.any(all_cuts):
+            # Create edge zones using dilation then subtraction
+            from scipy.ndimage import binary_dilation
+            cut_edges = binary_dilation(all_cuts, iterations=2) & ~all_cuts
+            
+            # DOWNWIND EDGES based on wind direction
+            wind_angles = {
+                'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
+                'S': 180, 'SW': 225, 'W': 270, 'NW': 315
+            }
+            wind_angle = wind_angles.get(wind_dir, 0)
+            
+            # Calculate aspect relative to wind (downwind = wind direction + 180)
+            downwind_angle = (wind_angle + 180) % 360
+            aspect_diff = np.abs(aspect - downwind_angle)
+            aspect_diff = np.minimum(aspect_diff, 360 - aspect_diff)
+            
+            # Downwind sides (within 90 degrees of downwind direction)
+            downwind_areas = aspect_diff < 90
+            
+            # Combine edges with downwind preference
+            downwind_edges = cut_edges & downwind_areas
+            
+            # Bucks prefer hard-to-access corners and transition zones
+            corner_bedding = downwind_edges & transition_zones
+            
+            # During pre-rut/rut: scent-checking areas
+            if phase in ["Pre-Rut", "Rut"]:
+                # Secondary cover downwind of doe groups (clear cut interiors)
+                doe_proximity = binary_dilation(clear_cuts['young_cuts'], iterations=3) & ~clear_cuts['young_cuts']
+                scent_check_areas = doe_proximity & downwind_areas
+                clear_cut_buck_bedding = corner_bedding | scent_check_areas
+            else:
+                # Early season: just edges and corners
+                clear_cut_buck_bedding = corner_bedding
+            
+            st.info(f"Found clear cuts - analyzing {wind_dir} downwind edges for buck bedding")
+    
+    # Traditional Infalt criteria
     access_slopes = (slope > 1) & (slope < 15)
-    
-    # 4. WATER PROXIMITY & THERMAL EFFECTS
-    # Dan mentions thermal pull toward water affects bedding location choice
-    # Lower elevation areas near water (marsh conditions)
     water_proximity = elevation < np.percentile(valid_elevation, 45)
-    
-    # 5. SECURITY COVER 
-    # "Go where no one else is willing to go. People and predators avoid water"
-    # Thick, wet, nasty areas that provide ultimate security
     security_areas = transition_zones & (water_proximity | bowls)
-    
-    # 6. TIP LOCATIONS
-    # "Bedding is typically located on the tips of these in transition to the marsh"
-    # Combine points/fingers with transition zones
     tip_bedding = (points_fingers | islands) & transition_zones
     
-    # COMBINE INFALT'S CRITERIA:
-    # Primary: Tips of points/fingers in transition zones
-    # Secondary: Bowls and islands with security cover
-    # Tertiary: Access trail ends in thick cover
-    
+    # COMBINE STRATEGIES
     if phase == "Rut":
-        # During rut: focus on tips and transition areas where bucks scent-check does
-        buck_potential = tip_bedding | (security_areas & access_slopes)
+        buck_potential = tip_bedding | (security_areas & access_slopes) | clear_cut_buck_bedding
     else:
-        # Pre-rut/Early: more isolated security areas
-        buck_potential = tip_bedding | (bowls & security_areas) | (islands & transition_zones)
+        buck_potential = tip_bedding | (bowls & security_areas) | (islands & transition_zones) | clear_cut_buck_bedding
     
-    # 7. APPLY DAN'S "GET CLOSE" PHILOSOPHY
-    # "Don't be afraid to get close. Pushing your distance from bedding might give you 
-    # the best chance of seeing a mature animal in daylight"
-    # This means being more aggressive in bedding identification
-    
+    # Apply aggression
     base_iterations = max(2, aggression - 2)
     buck_potential = binary_dilation(buck_potential, iterations=base_iterations)
     
-    # If still no areas, apply fallback but with Infalt's principles
+    # Fallback with clear cut consideration
     if not np.any(buck_potential):
-        st.info("Applying Dan Infalt's fallback strategy: any transition zone with security...")
+        st.info("Applying combined Infalt + clear cut fallback strategy...")
         fallback_bedding = transition_zones & access_slopes
+        if clear_cuts is not None:
+            fallback_bedding = fallback_bedding | (clear_cut_buck_bedding if np.any(clear_cut_buck_bedding) else np.zeros_like(elevation, dtype=bool))
         if np.any(fallback_bedding):
             buck_potential = binary_dilation(fallback_bedding, iterations=aggression)
     
-    return extract_points(buck_potential, transform, max_points=15, min_distance_meters=180)
+    return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
 
 def create_boundary_disturbance_zones(bounds):
     """Fallback method: assume roads near property boundaries"""
