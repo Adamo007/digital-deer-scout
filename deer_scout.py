@@ -783,9 +783,9 @@ if uploaded_file:
         doe_beds = []
         
         if show_doe_beds:
-            doe_beds_raw = find_doe_bedding(terrain_data, wind, aggression)
-            doe_beds_boundary = filter_points_by_boundary(doe_beds_raw, poly)
-            doe_beds = filter_road_proximity(doe_beds_boundary, road_zones)
+            doe_beds_raw = find_doe_bedding(terrain_data=terrain_data, wind_dir=wind, aggression=aggression)
+            doe_beds_boundary = filter_points_by_boundary(points=doe_beds_raw, boundary_polygon=poly)
+            doe_beds = filter_road_proximity(points=doe_beds_boundary, road_zones=road_zones)
             st.write(f"Found {len(doe_beds)} doe family bedding areas (traditional + clear cut interior strategy)")
             if terrain_data['ndvi'] is None:
                 st.info("NDVI data not available - using terrain-only analysis for vegetation cover estimation.")
@@ -794,9 +794,9 @@ if uploaded_file:
                 st.write(f"NDVI vegetation coverage: {ndvi_coverage:.1%} of area")
         
         if show_buck_beds:
-            buck_beds_raw = find_buck_bedding(terrain_data, wind, aggression, phase)
-            buck_beds_boundary = filter_points_by_boundary(buck_beds_raw, poly)
-            buck_beds = filter_road_proximity(buck_beds_boundary, road_zones)
+            buck_beds_raw = find_buck_bedding(terrain_data=terrain_data, wind_dir=wind, aggression=aggression, phase=phase)
+            buck_beds_boundary = filter_points_by_boundary(points=buck_beds_raw, boundary_polygon=poly)
+            buck_beds = filter_road_proximity(points=buck_beds_boundary, road_zones=road_zones)
             st.write(f"Found {len(buck_beds)} buck bedding areas (Military crest + clear cut downwind edges)")
             if len(buck_beds) == 0:
                 st.info("No mature buck beds found. Military crest strategy targets top 1/3 elevation with good visibility.")
@@ -804,8 +804,8 @@ if uploaded_file:
         # Generate KML
         if any([buck_beds, doe_beds]):
             st.write("Generating KML file...")
-            st.write(f"Debug: wind={wind}, phase={phase}")  # Debug line
-            kml_content = generate_kml(buck_beds, doe_beds, wind, phase)
+            st.write(f"Debug: calling generate_kml with wind={wind}, phase={phase}")
+            kml_content = generate_kml(buck_beds=buck_beds, doe_beds=doe_beds, wind_dir=wind, phase=phase)
             
             # Provide download
             st.download_button(
