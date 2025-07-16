@@ -15,7 +15,7 @@ from rasterio.transform import rowcol
 from skimage.filters import sobel
 import base64
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
-from scipy.ndimage import label, binary_erosion, binary_dilation
+from scipy.ndimage import label, binary_erosion, binary_dilation, gaussian_filter, minimum_filter, maximum_filter
 from sklearn.cluster import DBSCAN
 import xml.etree.ElementTree as ET
 import overpy
