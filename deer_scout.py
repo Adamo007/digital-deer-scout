@@ -175,6 +175,72 @@ def analyze_terrain(dem_path, ndvi_path, bounds):
         'bounds': bounds
     }
 
+def identify_clear_cuts(terrain_data):
+    """Identify clear cuts and estimate age based on vegetation patterns"""
+    if terrain_data['ndvi'] is None:
+        return None, None
+    
+    ndvi = terrain_data['ndvi']
+    elevation = terrain_data['elevation']
+    
+    # Clear cuts show distinct vegetation patterns
+    ndvi_valid = ~np.isnan(ndvi)
+    if not np.any(ndvi_valid):
+        return None, None
+    
+    # 1. Find circular/geometric patterns (clear cuts are often regular shapes)
+    from scipy.ndimage import label, binary_opening
+    
+    # Different NDVI ranges indicate different clear cut ages
+    # 0-1 years: Very low NDVI (0.1-0.3) - bare ground, slash
+    new_cuts = ndvi_valid & (ndvi > 0.1) & (ndvi < 0.3)
+    
+    # 2-5 years: Moderate NDVI (0.3-0.6) - dense regrowth, briars
+    young_cuts = ndvi_valid & (ndvi > 0.3) & (ndvi < 0.6)
+    
+    # 6-10 years: Higher NDVI (0.6-0.8) - thick saplings
+    mature_cuts = ndvi_valid & (ndvi > 0.6) & (ndvi < 0.8)
+    
+    # Clean up small patches - clear cuts are usually larger areas
+    new_cuts = binary_opening(new_cuts, iterations=2)
+    young_cuts = binary_opening(young_cuts, iterations=2)
+    mature_cuts = binary_opening(mature_cuts, iterations=2)
+    
+    # Find connected components and filter by size
+    new_labeled, new_num = label(new_cuts)
+    young_labeled, young_num = label(young_cuts)
+    mature_labeled, mature_num = label(mature_cuts)
+    
+    # Clear cuts should be substantial areas
+    min_cut_size = 100  # minimum pixels for a clear cut
+    
+    # Filter out small patches
+    for i in range(1, new_num + 1):
+        if np.sum(new_labeled == i) < min_cut_size:
+            new_cuts[new_labeled == i] = False
+    
+    for i in range(1, young_num + 1):
+        if np.sum(young_labeled == i) < min_cut_size:
+            young_cuts[young_labeled == i] = False
+            
+    for i in range(1, mature_num + 1):
+        if np.sum(mature_labeled == i) < min_cut_size:
+            mature_cuts[mature_labeled == i] = False
+    
+    clear_cuts = {
+        'new_cuts': new_cuts,      # 0-1 years
+        'young_cuts': young_cuts,  # 2-5 years 
+        'mature_cuts': mature_cuts # 6-10 years
+    }
+    
+    ages = {
+        'new_cuts': 1,
+        'young_cuts': 3.5,
+        'mature_cuts': 8
+    }
+    
+    return clear_cuts, ages
+
 def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
     """Find buck bedding areas using Dan Infalt's criteria - thick cover, swamps, near doe bedding"""
     elevation = terrain_data['elevation']
