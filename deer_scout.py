@@ -617,7 +617,9 @@ def generate_kml(buck_beds, doe_beds, wind_dir, phase):
     from xml.dom import minidom
     rough_string = ET.tostring(kml, 'utf-8')
     reparsed = minidom.parseString(rough_string)
-    return reparsed.toprettyxml(indent="  ")elevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
+    return reparsed.toprettyxml(indent="  ")
+
+# Guard: Require user to upload fileelevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
     
     # 6. BREAKLINES: Edges between cover types (using NDVI if available)
     breaklines = np.zeros_like(elevation, dtype=bool)
@@ -768,6 +770,10 @@ if uploaded_file:
     # Terrain Analysis and Pin Generation
     st.write("Analyzing terrain and generating hunting locations...")
     
+    # Create simple road avoidance zones
+    st.write("Creating boundary road buffer zones...")
+    road_zones = create_boundary_road_buffer(poly.bounds)
+    
     try:
         # Analyze terrain
         terrain_data = analyze_terrain(dem_path, ndvi_path, poly.bounds)
@@ -775,12 +781,11 @@ if uploaded_file:
         # Generate hunting locations
         buck_beds = []
         doe_beds = []
-        funnels = []
-        scrapes = []
         
         if show_doe_beds:
             doe_beds_raw = find_doe_bedding(terrain_data, wind, aggression)
-            doe_beds = filter_points_by_boundary(doe_beds_raw, poly)
+            doe_beds_boundary = filter_points_by_boundary(doe_beds_raw, poly)
+            doe_beds = filter_road_proximity(doe_beds_boundary, road_zones)
             st.write(f"Found {len(doe_beds)} doe family bedding areas (traditional + clear cut interior strategy)")
             if terrain_data['ndvi'] is None:
                 st.info("NDVI data not available - using terrain-only analysis for vegetation cover estimation.")
@@ -790,25 +795,16 @@ if uploaded_file:
         
         if show_buck_beds:
             buck_beds_raw = find_buck_bedding(terrain_data, wind, aggression, phase)
-            buck_beds = filter_points_by_boundary(buck_beds_raw, poly)
-            st.write(f"Found {len(buck_beds)} buck bedding areas (Infalt marsh transitions + clear cut downwind edges)")
+            buck_beds_boundary = filter_points_by_boundary(buck_beds_raw, poly)
+            buck_beds = filter_road_proximity(buck_beds_boundary, road_zones)
+            st.write(f"Found {len(buck_beds)} buck bedding areas (Military crest + clear cut downwind edges)")
             if len(buck_beds) == 0:
-                st.info("No mature buck beds found. Try: 1) Infalt's 'tips of points/fingers in transition to marsh', 2) Downwind edges of clear cuts")
-        
-        if show_funnels:
-            funnels_raw = find_funnels(terrain_data, aggression)
-            funnels = filter_points_by_boundary(funnels_raw, poly)
-            st.write(f"Found {len(funnels)} terrain funnels (Herndon method: saddles, inside corners, points, benches)")
-        
-        if show_scrapes:
-            scrapes_raw = find_scrape_locations(terrain_data, phase, aggression)
-            scrapes = filter_points_by_boundary(scrapes_raw, poly)
-            st.write(f"Found {len(scrapes)} potential scrape locations ({phase} pattern)")
+                st.info("No mature buck beds found. Military crest strategy targets top 1/3 elevation with good visibility.")
         
         # Generate KML
-        if any([buck_beds, doe_beds, funnels, scrapes]):
+        if any([buck_beds, doe_beds]):
             st.write("Generating KML file...")
-            kml_content = generate_kml(buck_beds, doe_beds, funnels, scrapes, wind, phase)
+            kml_content = generate_kml(buck_beds, doe_beds, wind, phase)
             
             # Provide download
             st.download_button(
@@ -822,15 +818,11 @@ if uploaded_file:
             
             # Display summary
             st.subheader("Location Summary")
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2 = st.columns(2)
             with col1:
                 st.metric("Buck Beds", len(buck_beds))
             with col2:
                 st.metric("Doe Beds", len(doe_beds))
-            with col3:
-                st.metric("Funnels", len(funnels))
-            with col4:
-                st.metric("Scrapes", len(scrapes))
         else:
             st.warning("No hunting locations generated. Try adjusting your parameters.")
             
