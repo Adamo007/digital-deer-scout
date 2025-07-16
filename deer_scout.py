@@ -804,6 +804,7 @@ if uploaded_file:
         # Generate KML
         if any([buck_beds, doe_beds]):
             st.write("Generating KML file...")
+            st.write(f"Debug: wind={wind}, phase={phase}")  # Debug line
             kml_content = generate_kml(buck_beds, doe_beds, wind, phase)
             
             # Provide download
