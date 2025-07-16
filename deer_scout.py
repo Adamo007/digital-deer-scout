@@ -273,6 +273,73 @@ def extract_points(binary_mask, transform, max_points=20, min_distance_meters=10
     
     return points
 
+def create_boundary_road_buffer(bounds):
+    """Simple road avoidance: assume roads along property boundaries"""
+    minx, miny, maxx, maxy = bounds
+    
+    # Create buffer zones along property edges where roads are likely
+    buffer_points = []
+    
+    # Points along boundaries with road buffer zones
+    boundary_points = [
+        # North boundary (likely road access)
+        *[(minx + i * (maxx - minx) / 8, maxy, 200) for i in range(9)],
+        # South boundary  
+        *[(minx + i * (maxx - minx) / 8, miny, 200) for i in range(9)],
+        # East boundary
+        *[(maxx, miny + i * (maxy - miny) / 8, 200) for i in range(9)],
+        # West boundary
+        *[(minx, miny + i * (maxy - miny) / 8, 200) for i in range(9)]
+    ]
+    
+    for lon, lat, buffer_m in boundary_points:
+        buffer_points.append({
+            'lat': lat,
+            'lon': lon,
+            'type': 'boundary_road',
+            'buffer_meters': buffer_m
+        })
+    
+    st.info(f"Created {len(buffer_points)} boundary road buffer zones")
+    return buffer_points
+
+def filter_road_proximity(points, road_zones):
+    """Remove points that are too close to likely road locations"""
+    if not road_zones:
+        return points
+    
+    filtered_points = []
+    removed_count = 0
+    
+    for lon, lat in points:
+        too_close = False
+        
+        for zone in road_zones:
+            # Calculate distance in meters
+            lat_diff = lat - zone['lat']
+            lon_diff = lon - zone['lon']
+            distance_meters = np.sqrt((lat_diff * 111000)**2 + (lon_diff * 111000 * np.cos(np.radians(lat)))**2)
+            
+            if distance_meters < zone['buffer_meters']:
+                too_close = True
+                removed_count += 1
+                break
+        
+        if not too_close:
+            filtered_points.append((lon, lat))
+    
+    if removed_count > 0:
+        st.info(f"Removed {removed_count} pins too close to likely road locations")
+    
+    return filtered_points
+    """Filter points to only include those within the boundary"""
+    filtered_points = []
+    for lon, lat in points:
+        point = Point(lon, lat)
+        if boundary_polygon.contains(point):
+            filtered_points.append((lon, lat))
+    return filtered_points
+
 def filter_points_by_boundary(points, boundary_polygon):
     """Filter points to only include those within the boundary"""
     filtered_points = []
@@ -283,7 +350,7 @@ def filter_points_by_boundary(points, boundary_polygon):
     return filtered_points
 
 def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
-    """Find buck bedding areas using Dan Infalt's strategies + clear cut edge tactics"""
+    """Find buck bedding areas using military crest + Dan Infalt's strategies + clear cut edge tactics"""
     elevation = terrain_data['elevation']
     slope = terrain_data['slope']
     aspect = terrain_data['aspect']
@@ -294,10 +361,28 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
     if len(valid_elevation) == 0:
         return []
     
+    # MILITARY CREST STRATEGY: 1/3 highest topology for bedding
+    # This eliminates hills that aren't tall enough with good views
+    elevation_min = np.min(valid_elevation)
+    elevation_max = np.max(valid_elevation)
+    elevation_range = elevation_max - elevation_min
+    
+    # Military crest: top 1/3 of elevation range but not the very peak
+    military_crest_high = elevation_max - (elevation_range * 0.15)  # 85th percentile
+    military_crest_low = elevation_max - (elevation_range * 0.33)   # 67th percentile
+    
+    military_crest = (elevation >= military_crest_low) & (elevation <= military_crest_high)
+    
+    # Only consider significant hills - filter out minor elevation changes
+    significant_elevation = elevation > (elevation_min + elevation_range * 0.4)
+    military_crest = military_crest & significant_elevation
+    
+    st.info(f"Military crest zone: {military_crest_low:.1f}m to {military_crest_high:.1f}m elevation")
+    
     # Identify clear cuts for buck edge strategy
     clear_cuts, _ = identify_clear_cuts(terrain_data)
     
-    # Dan Infalt's MARSH/TRANSITION strategies
+    # Dan Infalt's MARSH/TRANSITION strategies (but apply to military crest areas)
     transition_zones = np.ones_like(elevation, dtype=bool)
     if terrain_data['ndvi'] is not None:
         ndvi_valid = ~np.isnan(terrain_data['ndvi'])
@@ -309,29 +394,30 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
         elev_gradient = np.sqrt(np.gradient(elevation)[0]**2 + np.gradient(elevation)[1]**2)
         transition_zones = elev_gradient > np.std(valid_elevation) * 0.3
     
-    # Points, fingers, bowls, islands
+    # Points and fingers on military crest (high visibility positions)
     local_max = maximum_filter(elevation, size=7) == elevation
-    high_threshold = np.percentile(valid_elevation, 60)
-    points_fingers = local_max & (elevation > high_threshold)
+    military_points = local_max & military_crest
     
+    # Bowls and islands but only in military crest zone
     local_min = minimum_filter(elevation, size=5) == elevation
-    mid_threshold = np.percentile(valid_elevation, 40)
-    bowls = local_min & (elevation > mid_threshold)
+    military_bowls = local_min & military_crest
     
     surrounding_avg = gaussian_filter(elevation, sigma=3)
-    islands = (elevation > surrounding_avg + np.std(valid_elevation) * 0.2) & \
-              (elevation < np.percentile(valid_elevation, 75))
+    military_islands = (elevation > surrounding_avg + np.std(valid_elevation) * 0.2) & military_crest
     
-    # CLEAR CUT BUCK BEDDING STRATEGY
+    # CLEAR CUT BUCK BEDDING STRATEGY (on military crest edges)
     clear_cut_buck_bedding = np.zeros_like(elevation, dtype=bool)
     
     if clear_cuts is not None:
-        # Bucks use EDGES and DOWNWIND SIDES of clear cuts
+        # Bucks use EDGES and DOWNWIND SIDES of clear cuts, but prefer elevated positions
         all_cuts = clear_cuts['young_cuts'] | clear_cuts['mature_cuts']
         
         if np.any(all_cuts):
             # Create edge zones using dilation then subtraction
             cut_edges = binary_dilation(all_cuts, iterations=2) & ~all_cuts
+            
+            # Only edges that are on military crest for good visibility
+            elevated_edges = cut_edges & significant_elevation
             
             # DOWNWIND EDGES based on wind direction
             wind_angles = {
@@ -348,50 +434,52 @@ def find_buck_bedding(terrain_data, wind_dir, aggression, phase):
             # Downwind sides (within 90 degrees of downwind direction)
             downwind_areas = aspect_diff < 90
             
-            # Combine edges with downwind preference
-            downwind_edges = cut_edges & downwind_areas
+            # Combine elevated edges with downwind preference
+            downwind_elevated_edges = elevated_edges & downwind_areas
             
-            # Bucks prefer hard-to-access corners and transition zones
-            corner_bedding = downwind_edges & transition_zones
+            # Bucks prefer hard-to-access corners with good visibility
+            corner_bedding = downwind_elevated_edges & transition_zones
             
-            # During pre-rut/rut: scent-checking areas
+            # During pre-rut/rut: elevated scent-checking areas
             if phase in ["Pre-Rut", "Rut"]:
-                # Secondary cover downwind of doe groups (clear cut interiors)
+                # Secondary cover downwind of doe groups but elevated
                 doe_proximity = binary_dilation(clear_cuts['young_cuts'], iterations=3) & ~clear_cuts['young_cuts']
-                scent_check_areas = doe_proximity & downwind_areas
-                clear_cut_buck_bedding = corner_bedding | scent_check_areas
+                elevated_scent_check = doe_proximity & downwind_areas & significant_elevation
+                clear_cut_buck_bedding = corner_bedding | elevated_scent_check
             else:
-                # Early season: just edges and corners
+                # Early season: just elevated edges and corners
                 clear_cut_buck_bedding = corner_bedding
             
-            st.info(f"Found clear cuts - analyzing {wind_dir} downwind edges for buck bedding")
+            st.info(f"Found clear cuts - analyzing elevated {wind_dir} downwind edges for buck bedding")
     
-    # Traditional Infalt criteria
+    # Traditional Infalt criteria but on military crest
     access_slopes = (slope > 1) & (slope < 15)
-    water_proximity = elevation < np.percentile(valid_elevation, 45)
-    security_areas = transition_zones & (water_proximity | bowls)
-    tip_bedding = (points_fingers | islands) & transition_zones
     
-    # COMBINE STRATEGIES
+    # Water proximity but elevated (overlooks to water)
+    overlook_positions = military_crest & (elevation > np.percentile(valid_elevation, 60))
+    
+    # Security areas on military crest with good visibility
+    security_areas = transition_zones & military_crest
+    tip_bedding = (military_points | military_islands) & transition_zones
+    
+    # COMBINE STRATEGIES (all must be on military crest for visibility)
     if phase == "Rut":
         buck_potential = tip_bedding | (security_areas & access_slopes) | clear_cut_buck_bedding
     else:
-        buck_potential = tip_bedding | (bowls & security_areas) | (islands & transition_zones) | clear_cut_buck_bedding
+        buck_potential = tip_bedding | (military_bowls & security_areas) | (military_islands & transition_zones) | clear_cut_buck_bedding
     
-    # Apply aggression
-    base_iterations = max(2, aggression - 2)
+    # Apply aggression but be more selective for military crest
+    base_iterations = max(1, aggression - 3)  # Less aggressive than before
     buck_potential = binary_dilation(buck_potential, iterations=base_iterations)
     
-    # Fallback with clear cut consideration
+    # Fallback: any military crest position with cover
     if not np.any(buck_potential):
-        st.info("Applying combined Infalt + clear cut fallback strategy...")
-        fallback_bedding = transition_zones & access_slopes
-        if clear_cuts is not None:
-            fallback_bedding = fallback_bedding | (clear_cut_buck_bedding if np.any(clear_cut_buck_bedding) else np.zeros_like(elevation, dtype=bool))
+        st.info("Applying military crest fallback: elevated positions with cover...")
+        fallback_bedding = military_crest & transition_zones & access_slopes
         if np.any(fallback_bedding):
-            buck_potential = binary_dilation(fallback_bedding, iterations=aggression)
+            buck_potential = binary_dilation(fallback_bedding, iterations=max(1, aggression-4))
     
-    return extract_points(buck_potential, transform, max_points=20, min_distance_meters=150)
+    return extract_points(buck_potential, transform, max_points=12, min_distance_meters=200)  # Reduced max points
 
 def find_doe_bedding(terrain_data, wind_dir, aggression):
     """Find doe bedding areas including clear cut interior strategy"""
@@ -408,9 +496,9 @@ def find_doe_bedding(terrain_data, wind_dir, aggression):
     # Identify clear cuts for doe bedding analysis
     clear_cuts, _ = identify_clear_cuts(terrain_data)
     
-    # Traditional doe bedding
+    # Traditional doe bedding - security over visibility
     mid_elevation = (elevation > np.percentile(valid_elevation, 15)) & \
-                   (elevation < np.percentile(valid_elevation, 85))
+                   (elevation < np.percentile(valid_elevation, 75))  # Broader range than bucks
     
     good_slope = (slope > 1) & (slope < 25)
     
@@ -470,60 +558,66 @@ def find_doe_bedding(terrain_data, wind_dir, aggression):
     # Combine traditional and clear cut bedding
     doe_potential = traditional_doe_bedding | clear_cut_bedding
     
-    # Enhanced aggression scaling
-    base_iterations = max(1, aggression - 2)
-    if aggression > 5:
+    # Enhanced aggression scaling - more aggressive than bucks to get more doe beds
+    base_iterations = max(2, aggression - 1)  # More aggressive than buck bedding
+    if aggression > 4:
         doe_potential = binary_dilation(doe_potential, iterations=base_iterations)
     
-    return extract_points(doe_potential, transform, max_points=30, min_distance_meters=100)
+    return extract_points(doe_potential, transform, max_points=25, min_distance_meters=100)  # More doe beds allowed
 
-def find_funnels(terrain_data, aggression):
-    """Find natural funnels using Brad Herndon's terrain features"""
-    elevation = terrain_data['elevation']
-    slope = terrain_data['slope']
-    transform = terrain_data['transform']
+def generate_kml(buck_beds, doe_beds, wind_dir, phase):
+    """Generate KML file with hunting locations"""
     
-    # Remove invalid data
-    valid_mask = ~np.isnan(elevation) & (elevation > 0)
-    if not np.any(valid_mask):
-        return []
+    # Create KML structure
+    kml = ET.Element("kml", xmlns="http://www.opengis.net/kml/2.2")
+    document = ET.SubElement(kml, "Document")
     
-    valid_elevation = elevation[valid_mask]
+    # Add document info
+    name = ET.SubElement(document, "name")
+    name.text = f"Digital Deer Scout - {phase} - Wind: {wind_dir} (Military Crest + Clear Cuts)"
     
-    # Brad Herndon's Key Terrain Features:
+    # Define styles
+    styles = {
+        'buck_bed': {'color': 'ff0000ff', 'icon': 'http://maps.google.com/mapfiles/kml/pushpin/red-pushpin.png'},
+        'doe_bed': {'color': 'ff00ff00', 'icon': 'http://maps.google.com/mapfiles/kml/pushpin/grn-pushpin.png'}
+    }
     
-    # 1. SADDLES: Low points along ridgelines
-    elevation_smooth = gaussian_filter(elevation, sigma=3)
-    gy, gx = np.gradient(elevation_smooth)
-    gyy, gyx = np.gradient(gy)
-    gxy, gxx = np.gradient(gx)
-    gaussian_curvature = gxx * gyy - gxy**2
+    for style_id, style_props in styles.items():
+        style = ET.SubElement(document, "Style", id=style_id)
+        icon_style = ET.SubElement(style, "IconStyle")
+        color = ET.SubElement(icon_style, "color")
+        color.text = style_props['color']
+        icon = ET.SubElement(icon_style, "Icon")
+        href = ET.SubElement(icon, "href")
+        href.text = style_props['icon']
     
-    # Saddles have negative Gaussian curvature
-    saddles = (gaussian_curvature < -0.0005) & valid_mask
+    # Add placemarks
+    def add_placemark(coords_list, name_prefix, style_id, description=""):
+        for i, (lon, lat) in enumerate(coords_list):
+            placemark = ET.SubElement(document, "Placemark")
+            name_elem = ET.SubElement(placemark, "name")
+            name_elem.text = f"{name_prefix} {i+1}"
+            
+            if description:
+                desc_elem = ET.SubElement(placemark, "description")
+                desc_elem.text = description
+            
+            style_url = ET.SubElement(placemark, "styleUrl")
+            style_url.text = f"#{style_id}"
+            
+            point = ET.SubElement(placemark, "Point")
+            coordinates = ET.SubElement(point, "coordinates")
+            coordinates.text = f"{lon},{lat},0"
     
-    # 2. INSIDE CORNERS: L-shaped transitions (terrain breaks)
-    # Find areas where slope direction changes rapidly
-    aspect = np.arctan2(gy, gx) * 180 / np.pi
-    aspect_change = np.abs(np.gradient(aspect)[0]) + np.abs(np.gradient(aspect)[1])
-    inside_corners = (aspect_change > 30) & (slope > 3) & (slope < 15) & valid_mask
+    # Add hunting locations
+    add_placemark(buck_beds, "Buck Bed", "buck_bed", "Military crest bedding: elevated visibility + clear cut edges")
+    add_placemark(doe_beds, "Doe Bed", "doe_bed", "Family group bedding: security cover + clear cut interiors")
     
-    # 3. POINTS: Ridge ends overlooking valleys
-    local_max = maximum_filter(elevation_smooth, size=7) == elevation_smooth
-    high_threshold = np.percentile(valid_elevation, 70)
-    ridge_points = local_max & (elevation > high_threshold) & valid_mask
-    
-    # 4. BENCHES: Flat terraces on slopes
-    # Areas with low slope surrounded by steeper terrain
-    slope_smooth = gaussian_filter(slope, sigma=2)
-    surrounding_slope = maximum_filter(slope_smooth, size=5)
-    benches = (slope_smooth < 8) & (surrounding_slope > 12) & valid_mask
-    
-    # 5. CONVERGING HUBS: Multiple terrain lines meeting
-    # Find areas where multiple drainage or ridge lines converge
-    local_min = minimum_filter(elevation_smooth, size=5) == elevation_smooth
-    drainage_threshold = np.percentile(valid_elevation, 40)
-    drainage_hubs = local_min & (elevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
+    # Convert to string
+    from xml.dom import minidom
+    rough_string = ET.tostring(kml, 'utf-8')
+    reparsed = minidom.parseString(rough_string)
+    return reparsed.toprettyxml(indent="  ")elevation > drainage_threshold) & (elevation < np.percentile(valid_elevation, 70))
     
     # 6. BREAKLINES: Edges between cover types (using NDVI if available)
     breaklines = np.zeros_like(elevation, dtype=bool)
